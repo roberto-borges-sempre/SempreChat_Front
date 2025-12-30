@@ -4,23 +4,76 @@ from sqlalchemy import create_engine, text
 import requests
 import time
 
-# --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="SempreChat CRM", page_icon="📶", layout="wide")
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
-# --- BANCO ---
+# --- ESTILO VISUAL (TIPO WHATSAPP) ---
+st.markdown("""
+<style>
+    /* Fundo geral mais claro */
+    .stApp { background-color: #efeae2; }
+    
+    /* Balão do Cliente (Esquerda, Branco) */
+    .chat-bubble-cliente {
+        background-color: #ffffff;
+        color: #000000;
+        padding: 10px 15px;
+        border-radius: 0px 15px 15px 15px;
+        margin: 5px 0;
+        max-width: 75%;
+        float: left;
+        clear: both;
+        box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+        font-size: 16px;
+    }
+    
+    /* Balão da Empresa (Direita, Verde) */
+    .chat-bubble-empresa {
+        background-color: #dcf8c6;
+        color: #000000;
+        padding: 10px 15px;
+        border-radius: 15px 0px 15px 15px;
+        margin: 5px 0;
+        max-width: 75%;
+        float: right;
+        clear: both;
+        box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+        font-size: 16px;
+        text-align: left;
+    }
+    
+    /* Hora da mensagem */
+    .chat-time {
+        display: block;
+        font-size: 11px;
+        color: #999;
+        margin-top: 4px;
+        text-align: right;
+    }
+
+    /* Container das mensagens */
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        padding: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- CONEXÃO BANCO ---
 try:
     if "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"].replace("postgres://", "postgresql://")
         engine = create_engine(db_url)
     else:
-        st.error("Configure DATABASE_URL.")
+        st.error("⚠️ Configure DATABASE_URL nos Secrets.")
         st.stop()
 except Exception as e:
-    st.error(f"Erro DB: {e}")
+    st.error(f"Erro Conexão DB: {e}")
     st.stop()
 
 # =======================
-# 🛠️ FUNÇÕES BACKEND
+# 🛠️ FUNÇÕES DE BANCO
 # =======================
 
 @st.cache_data(ttl=60) 
@@ -33,10 +86,12 @@ def listar_usuarios_ativos():
     with engine.connect() as conn:
         return pd.read_sql(text("SELECT id, nome FROM usuarios WHERE ativo=TRUE ORDER BY nome"), conn)
 
-@st.cache_data(ttl=5)
+# Reduzi o cache da fila para 2 segundos para ficar mais "vivo"
+@st.cache_data(ttl=2)
 def carregar_fila(admin=False, usuario_id=None):
     with engine.connect() as conn:
         filtro = "" if admin else f"AND (c.vendedora_id = {usuario_id} OR c.vendedora_id IS NULL)"
+        # Query blindada
         query = text(f"""
             SELECT c.id, c.nome, c.whatsapp_id, c.status_atendimento, u.nome as vendedora, c.codigo_cliente
             FROM contatos c
@@ -54,7 +109,7 @@ def carregar_info_cliente(cid):
     with engine.connect() as conn:
         return conn.execute(text("SELECT nome, whatsapp_id, codigo_cliente, cpf_cnpj, notas_internas FROM contatos WHERE id=:id"), {"id":cid}).fetchone()
 
-# --- FUNÇÕES DE EDIÇÃO ---
+# --- AÇÕES ---
 def criar_usuario(nome, email, senha, funcao):
     try:
         with engine.connect() as conn:
@@ -80,7 +135,7 @@ def excluir_usuario(id_u):
         conn.commit()
     listar_todos_usuarios.clear()
 
-# --- CONFIGURAÇÃO ROBÔ ---
+# --- ROBÔ / CONFIG ---
 def pegar_msg_boas_vindas():
     with engine.connect() as conn:
         res = conn.execute(text("SELECT valor FROM configuracoes WHERE chave='msg_boas_vindas'")).fetchone()
@@ -92,6 +147,14 @@ def salvar_msg_boas_vindas(texto):
         conn.commit()
 
 # --- META API ---
+def get_media_bytes(media_id):
+    try:
+        url = f"https://graph.facebook.com/v18.0/{media_id}"
+        headers = {"Authorization": f"Bearer {st.secrets['META_TOKEN']}"}
+        r = requests.get(url, headers=headers).json()
+        if 'url' in r: return requests.get(r['url'], headers=headers).content
+    except: return None
+
 def enviar_mensagem_api(telefone, texto, tipo="text", template_name=None):
     tel = ''.join(filter(str.isdigit, str(telefone)))
     if len(tel) == 13 and tel.startswith("55"): tel = tel[:4] + tel[5:]
@@ -108,7 +171,7 @@ def enviar_mensagem_api(telefone, texto, tipo="text", template_name=None):
         return resp.status_code, resp.json(), cost
     except Exception as e: return 500, str(e), 0.0
 
-# --- LÓGICA DE UPDATE CLIENTE ---
+# --- UPDATES CLIENTE ---
 def atualizar_cliente(cid, codigo, notas):
     with engine.connect() as conn:
         conn.execute(text("UPDATE contatos SET codigo_cliente=:c, notas_internas=:n WHERE id=:id"), {"c":codigo, "n":notas, "id":cid})
@@ -145,13 +208,14 @@ def excluir_rr(rid):
 
 if "usuario" not in st.session_state: st.session_state.usuario = None
 if "pagina" not in st.session_state: st.session_state.pagina = "chat"
-if "chat_input_text" not in st.session_state: st.session_state.chat_input_text = ""
+# Variável para preencher o campo de texto
+if "texto_preenchido" not in st.session_state: st.session_state.texto_preenchido = ""
 
 # --- LOGIN ---
 if st.session_state.usuario is None:
     c1,c2,c3 = st.columns([1,2,1])
     with c2:
-        st.title("📶 SempreChat Login")
+        st.title("🔐 SempreChat Login")
         with st.form("login"):
             email = st.text_input("Email")
             senha = st.text_input("Senha", type="password")
@@ -164,14 +228,15 @@ if st.session_state.usuario is None:
                     st.rerun()
                 else: st.error("Erro no login")
 else:
-    # SIDEBAR
+    # --- SIDEBAR ---
     with st.sidebar:
         st.write(f"👤 **{st.session_state.usuario['nome']}**")
         st.caption(st.session_state.usuario['funcao'])
+        
         if st.button("💬 Chat", use_container_width=True): st.session_state.pagina = "chat"; st.rerun()
         if st.button("⚡ Respostas", use_container_width=True): st.session_state.pagina = "respostas"; st.rerun()
         if st.session_state.usuario['funcao']=='admin':
-            if st.button("⚙️ Admin / Equipe", use_container_width=True): st.session_state.pagina = "admin"; st.rerun()
+            if st.button("⚙️ Admin", use_container_width=True): st.session_state.pagina = "admin"; st.rerun()
         if st.button("Sair", type="primary"): st.session_state.usuario = None; st.rerun()
         st.divider()
         
@@ -179,6 +244,8 @@ else:
         if st.session_state.pagina == "chat":
             st.subheader("📥 Fila")
             is_adm = st.session_state.usuario['funcao']=='admin'
+            
+            # --- TENTATIVA DE CARREGAR FILA COM DEBUG DE ERRO ---
             try:
                 df = carregar_fila(is_adm, st.session_state.usuario['id'])
                 if df.empty: st.info("Vazia")
@@ -186,67 +253,124 @@ else:
                     d = f"🟢 {r['nome']}"
                     if is_adm and r['vendedora']: d = f"🔒 {r['vendedora']} | {r['nome']}"
                     if r['codigo_cliente']: d += f" ({r['codigo_cliente']})"
+                    
                     if st.button(d, key=f"c_{r['id']}", use_container_width=True):
                         st.session_state.chat_ativo = r['id']
                         st.rerun()
-            except: st.error("Erro fila")
+            except Exception as e:
+                st.error("❌ Erro ao ler fila:")
+                st.code(str(e)) # Mostra o erro real pro usuário
+                if st.button("Limpar Cache"):
+                    carregar_fila.clear()
+                    st.rerun()
 
-    # --- CHAT ---
+    # --- PÁGINA: CHAT ---
     if st.session_state.pagina == "chat":
         if "chat_ativo" in st.session_state:
             cli = carregar_info_cliente(st.session_state.chat_ativo)
-            if not cli: st.warning("Cliente sumiu"); st.stop()
+            if not cli: st.warning("Cliente não encontrado"); st.stop()
             
+            # HEADER
             c1,c2,c3 = st.columns([3,1,1])
-            with c1: st.markdown(f"### 💬 {cli[0]}")
+            with c1: st.markdown(f"### {cli[0]}")
             with c2: 
                 us = listar_usuarios_ativos()
                 ud = {u[1]:u[0] for _,u in us.iterrows()}
                 d = st.selectbox("Transf", ["--"]+list(ud.keys()), label_visibility="collapsed")
                 if d!="--": 
-                    if st.button("Ok", key="tf"): transferir_atendimento(st.session_state.chat_ativo, ud[d]); st.success("Foi!"); time.sleep(1); st.rerun()
+                    if st.button("Ok", key="tf"): transferir_atendimento(st.session_state.chat_ativo, ud[d]); st.success("Foi!"); time.sleep(0.5); st.rerun()
             with c3:
-                if st.button("🔴 Fim", use_container_width=True): encerrar_atendimento(st.session_state.chat_ativo); del st.session_state['chat_ativo']; st.success("Fim"); st.rerun()
+                if st.button("🔴 Fim", use_container_width=True): 
+                    encerrar_atendimento(st.session_state.chat_ativo)
+                    del st.session_state['chat_ativo']
+                    st.success("Fim"); st.rerun()
 
-            with st.expander("📝 Cadastro"):
+            # CADASTRO (Expander)
+            with st.expander(f"📝 Cadastro (Cód: {cli[2] if cli[2] else '--'})"):
                 with st.form("fc"):
-                    # LABEL ALTERADA CONFORME PEDIDO
                     nc = st.text_input("Código / CPF / CNPJ", value=cli[2] if cli[2] else "")
                     nn = st.text_area("Notas", value=cli[4] if cli[4] else "")
-                    if st.form_submit_button("Salvar"): atualizar_cliente(st.session_state.chat_ativo, nc, nn); st.success("Salvo"); st.rerun()
+                    if st.form_submit_button("Salvar"): 
+                        atualizar_cliente(st.session_state.chat_ativo, nc, nn)
+                        st.success("Salvo"); st.rerun()
             
             st.divider()
-            # MSG
-            msgs = carregar_mensagens(st.session_state.chat_ativo)
-            with st.container(height=450):
-                if msgs.empty: st.info("Nada aqui.")
-                for _,r in msgs.iterrows():
-                    av = "👤" if r['remetente']=='cliente' else "🏢"
-                    with st.chat_message(r['remetente'], avatar=av):
-                        if r['texto'] and r['texto']!="None": st.write(r['texto'])
-                        st.caption(r['data_envio'].strftime('%H:%M'))
 
-            # ENVIO
+            # --- ÁREA DE MENSAGENS (ESTILO WHATSAPP) ---
+            msgs = carregar_mensagens(st.session_state.chat_ativo)
+            with st.container(height=500):
+                if msgs.empty: st.info("Nenhuma mensagem ainda.")
+                
+                # Loop Manual para HTML Personalizado
+                for _, r in msgs.iterrows():
+                    # Define classe CSS baseada no remetente
+                    css_class = "chat-bubble-cliente" if r['remetente'] == 'cliente' else "chat-bubble-empresa"
+                    hora = r['data_envio'].strftime('%H:%M')
+                    
+                    # Conteúdo (Texto ou Mídia)
+                    conteudo_html = ""
+                    if r['texto'] and r['texto'] != "None":
+                        conteudo_html += f"<span>{r['texto']}</span>"
+                    
+                    # Se tiver mídia, renderizamos com st.image/audio fora do HTML (limitação do streamlti)
+                    # Truque: Usamos colunas para posicionar a mídia
+                    
+                    st.markdown(f"""
+                    <div class="{css_class}">
+                        {conteudo_html}
+                        <span class="chat-time">{hora}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Renderiza Mídia (Foto/Audio) abaixo do balão se houver
+                    if r['tipo'] in ['image', 'audio', 'voice'] and r['url_media']:
+                        data = get_media_bytes(r['url_media'])
+                        if data:
+                            col_a, col_b, col_c = st.columns([1, 2, 1])
+                            # Se for empresa, joga pra direita (col_c), se cliente, esquerda (col_a)
+                            target_col = col_c if r['remetente'] == 'empresa' else col_a
+                            with target_col:
+                                if r['tipo'] == 'image': st.image(data, width=150)
+                                else: st.audio(data)
+
+            st.divider()
+
+            # --- ENVIO (SOLUÇÃO DE LIMPEZA E FORMULÁRIO) ---
+            
+            # 1. Seletor de Resposta Rápida (Fora do Form)
             rr = listar_rr()
             rrd = {r[1]:r[2] for _,r in rr.iterrows()}
-            rrs = st.selectbox("⚡ Rápida", ["--"]+list(rrd.keys()))
-            if rrs!="--": st.session_state.chat_input_text = rrd[rrs]
-
-            def send_cb():
-                txt = st.session_state.chat_input_text
-                if txt:
-                    c,r,co = enviar_mensagem_api(cli[1], txt)
-                    if c in [200,201]:
-                        with engine.connect() as conn:
-                            conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'text',0)"), {"cid":st.session_state.chat_ativo, "t":txt})
-                            conn.commit()
-                        st.session_state.chat_input_text = ""
+            rrs = st.selectbox("⚡ Mensagem Rápida", ["--"]+list(rrd.keys()))
             
-            c_in, c_b = st.columns([6,1])
-            c_in.text_input("Msg", key="chat_input_text", on_change=send_cb)
-            if c_b.button("Enviar"): send_cb(); st.rerun()
+            # Se selecionar, atualiza o estado para preencher o campo
+            if rrs != "--":
+                st.session_state.texto_preenchido = rrd[rrs]
 
-            with st.expander("📢 Template"):
+            # 2. Formulário de Envio (Resolve o Enter e Limpeza)
+            with st.form("form_envio", clear_on_submit=True):
+                # Campo de texto recebe valor do session_state
+                txt_input = st.text_area("Mensagem", value=st.session_state.texto_preenchido, height=70, key="widget_msg")
+                
+                col_btn_env, col_tpl = st.columns([1, 5])
+                with col_btn_env:
+                    enviar = st.form_submit_button("Enviar ➤")
+                
+                if enviar and txt_input:
+                    # Envia API
+                    c, r, co = enviar_mensagem_api(cli[1], txt_input)
+                    if c in [200, 201]:
+                        # Salva Banco
+                        with engine.connect() as conn:
+                            conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'text',0)"), {"cid":st.session_state.chat_ativo, "t":txt_input})
+                            conn.commit()
+                        # Limpa variavel auxiliar
+                        st.session_state.texto_preenchido = ""
+                        st.rerun()
+                    else:
+                        st.error(f"Erro envio: {r}")
+
+            # Template fora do form principal
+            with st.expander("📢 Template (Furar 24h)"):
                 tp = st.text_input("Nome Template")
                 if st.button("Enviar Tpl"):
                     c,r,co = enviar_mensagem_api(cli[1], "", "template", tp)
@@ -254,12 +378,13 @@ else:
                         with engine.connect() as conn:
                             conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":f"[TPL: {tp}]", "c":co})
                             conn.commit()
-                        st.success("Enviado")
-        else: st.info("Escolha um cliente")
+                        st.success("Enviado"); st.rerun()
+        else:
+            st.info("👈 Selecione um cliente na fila.")
 
     # --- RESPOSTAS ---
     elif st.session_state.pagina == "respostas":
-        st.header("⚡ Respostas Rápidas")
+        st.header("⚡ Gerenciar Respostas")
         with st.form("nrr"):
             t = st.text_input("Título"); tx = st.text_area("Texto")
             if st.form_submit_button("Criar"): criar_rr(t, tx, st.session_state.usuario['id']); st.rerun()
@@ -270,10 +395,9 @@ else:
             if c3.button("🗑️", key=f"dr_{r['id']}"): excluir_rr(r['id']); st.rerun()
         if st.button("Voltar"): st.session_state.pagina="chat"; st.rerun()
 
-    # --- ADMIN (NOVA VERSÃO COM EDIÇÃO DE NOME E SAUDAÇÃO) ---
+    # --- ADMIN ---
     elif st.session_state.pagina == "admin":
         st.header("⚙️ Admin")
-        
         tab1, tab2, tab3 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô"])
         
         with tab1:
@@ -283,47 +407,18 @@ else:
                     b,m = criar_usuario(n,e,s,f)
                     if b: st.success(m)
                     else: st.error(m)
-
         with tab2:
-            st.subheader("Lista de Usuários")
             dfu = listar_todos_usuarios()
             st.dataframe(dfu)
-            
-            st.divider()
-            st.write("✏️ **Editar Usuário**")
-            
-            # Seletor de usuário
             u_ids = dfu['id'].tolist()
-            sel_uid = st.selectbox("Selecione para editar", u_ids, format_func=lambda x: dfu[dfu['id']==x]['nome'].values[0])
-            
-            # Pega dados atuais
-            user_atual = dfu[dfu['id']==sel_uid].iloc[0]
-            
+            sel_uid = st.selectbox("Selecione", u_ids, format_func=lambda x: dfu[dfu['id']==x]['nome'].values[0])
             with st.form("edit_user"):
-                novo_nome = st.text_input("Nome", value=user_atual['nome'])
-                nova_senha = st.text_input("Nova Senha (deixe vazio para manter)", type="password")
-                
-                if st.form_submit_button("💾 Salvar Alterações"):
-                    s_final = nova_senha if nova_senha else None
-                    editar_usuario(sel_uid, novo_nome, s_final)
-                    st.success("Usuário atualizado!")
-                    time.sleep(1)
-                    st.rerun()
-            
-            st.divider()
-            if st.button("🗑️ Excluir Selecionado", type="primary"):
-                if sel_uid == st.session_state.usuario['id']: st.error("Não se exclua!")
-                else: excluir_usuario(sel_uid); st.rerun()
-
+                nn = st.text_input("Novo Nome"); ns = st.text_input("Nova Senha", type="password")
+                if st.form_submit_button("Salvar"): editar_usuario(sel_uid, nn, ns if ns else None); st.success("Salvo!"); time.sleep(1); st.rerun()
+            if st.button("Excluir", type="primary"): excluir_usuario(sel_uid); st.rerun()
         with tab3:
-            st.subheader("🤖 Mensagem de Saudação Automática")
-            st.info("Esta mensagem será enviada automaticamente quando um cliente NOVO entrar em contato, ou um cliente ENCERRADO voltar a chamar.")
-            
-            msg_atual = pegar_msg_boas_vindas()
-            with st.form("conf_robo"):
-                txt_saudacao = st.text_area("Texto da Saudação", value=msg_atual, height=150)
-                if st.form_submit_button("Salvar Saudação"):
-                    salvar_msg_boas_vindas(txt_saudacao)
-                    st.success("Configuração salva!")
-
+            msg = pegar_msg_boas_vindas()
+            with st.form("cr"):
+                txt = st.text_area("Saudação", value=msg)
+                if st.form_submit_button("Salvar"): salvar_msg_boas_vindas(txt); st.success("Ok")
         if st.button("Voltar"): st.session_state.pagina="chat"; st.rerun()
