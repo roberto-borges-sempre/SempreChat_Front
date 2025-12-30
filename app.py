@@ -75,7 +75,9 @@ def carregar_fila(admin=False, usuario_id=None):
         return pd.read_sql(query, conn)
 
 def carregar_mensagens(cid):
-    with engine.connect() as conn: return pd.read_sql(text("SELECT remetente, texto, tipo, url_media, data_envio FROM mensagens WHERE contato_id = :cid ORDER BY data_envio ASC"), conn, params={"cid":cid})
+    # ATUALIZADO: Agora busca o 'id' da mensagem também para usar como chave única
+    with engine.connect() as conn: 
+        return pd.read_sql(text("SELECT id, remetente, texto, tipo, url_media, data_envio FROM mensagens WHERE contato_id = :cid ORDER BY data_envio ASC"), conn, params={"cid":cid})
 
 def carregar_info_cliente(cid):
     with engine.connect() as conn: return conn.execute(text("SELECT nome, whatsapp_id, codigo_cliente, cpf_cnpj, notas_internas FROM contatos WHERE id=:id"), {"id":cid}).fetchone()
@@ -137,7 +139,7 @@ def salvar_msg_boas_vindas(txt):
     except Exception as e:
         return False, f"Erro Banco: {e}"
 
-# --- META API (AGORA COM UPLOAD DE MÍDIA) ---
+# --- META API ---
 def upload_para_meta(uploaded_file, mime_type):
     """Envia o arquivo para a Meta e retorna o ID"""
     url = f"https://graph.facebook.com/v18.0/{st.secrets['META_PHONE_ID']}/media"
@@ -300,6 +302,7 @@ else:
                     h = r['data_envio'].strftime('%H:%M')
                     cnt = f"<span>{r['texto']}</span>" if r['texto'] and r['texto']!="None" else ""
                     st.markdown(f"""<div class="{cls}">{cnt}<span class="chat-time">{h}</span></div>""", unsafe_allow_html=True)
+                    
                     if r['tipo'] in ['image','audio','voice','document'] and r['url_media']:
                         dt = get_media_bytes(r['url_media'])
                         if dt:
@@ -308,7 +311,8 @@ else:
                             with tc:
                                 if r['tipo']=='image': st.image(dt, width=200)
                                 elif r['tipo']=='audio': st.audio(dt)
-                                elif r['tipo']=='document': st.download_button("📄 Baixar Arquivo", dt, file_name="anexo.pdf")
+                                # CORREÇÃO AQUI: Adicionado key única para cada botão usando o ID da mensagem
+                                elif r['tipo']=='document': st.download_button("📄 Baixar Arquivo", dt, file_name="anexo.pdf", key=f"file_{r['id']}")
 
             # --- ÁREA DE ENVIO DE ARQUIVOS ---
             with st.expander("📎 Anexar Arquivo (Foto, PDF ou Áudio)"):
@@ -316,17 +320,14 @@ else:
                 if uploaded_file is not None:
                     if st.button("Enviar Arquivo"):
                         with st.spinner("Enviando para o WhatsApp..."):
-                            # Define tipo
                             mime = uploaded_file.type
                             tipo_msg = "document"
                             if "image" in mime: tipo_msg = "image"
                             elif "audio" in mime: tipo_msg = "audio"
                             
-                            # Upload Meta
                             media_id = upload_para_meta(uploaded_file, mime)
                             
                             if media_id:
-                                # Envia Msg
                                 c, r, co = enviar_mensagem_api(cli[1], media_id, tipo=tipo_msg)
                                 if c in [200, 201]:
                                     with engine.connect() as conn:
