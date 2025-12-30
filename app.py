@@ -25,13 +25,16 @@ st.markdown("""
     }
     .chat-time { display: block; font-size: 11px; color: #999; margin-top: 4px; text-align: right; }
     
-    /* === CAIXA DE TEXTO MAIOR === */
+    /* === CAIXA DE TEXTO === */
     .stChatInputContainer { padding-bottom: 20px !important; }
     textarea[data-testid="stChatInputTextArea"] {
-        min-height: 50px !important;
-        height: auto !important;
-        font-size: 16px !important;
-        align-content: center !important;
+        min-height: 50px !important; height: auto !important;
+        font-size: 16px !important; align-content: center !important;
+    }
+    
+    /* Ajuste do Uploader para parecer um anexo discreto */
+    div[data-testid="stExpander"] {
+        border: none; box-shadow: none; background-color: transparent;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -100,7 +103,6 @@ def excluir_usuario(uid):
         conn.commit()
     listar_todos_usuarios.clear()
 
-# --- UPDATE CLIENTE ---
 def atualizar_cliente_completo(cid, nome, codigo, notas):
     with engine.connect() as conn:
         conn.execute(text("UPDATE contatos SET nome=:nm, codigo_cliente=:c, notas_internas=:n WHERE id=:id"), {"nm":nome, "c":codigo, "n":notas, "id":cid})
@@ -119,7 +121,6 @@ def encerrar_atendimento(cid):
         conn.commit()
     carregar_fila.clear()
 
-# --- CONFIGURAÇÃO ROBÔ ---
 def pegar_msg_boas_vindas():
     try:
         with engine.connect() as conn:
@@ -136,7 +137,26 @@ def salvar_msg_boas_vindas(txt):
     except Exception as e:
         return False, f"Erro Banco: {e}"
 
-# --- META API ---
+# --- META API (AGORA COM UPLOAD DE MÍDIA) ---
+def upload_para_meta(uploaded_file, mime_type):
+    """Envia o arquivo para a Meta e retorna o ID"""
+    url = f"https://graph.facebook.com/v18.0/{st.secrets['META_PHONE_ID']}/media"
+    headers = {"Authorization": f"Bearer {st.secrets['META_TOKEN']}"}
+    
+    files = {
+        'file': (uploaded_file.name, uploaded_file.getvalue(), mime_type)
+    }
+    data = {'messaging_product': 'whatsapp'}
+    
+    try:
+        response = requests.post(url, headers=headers, files=files, data=data)
+        if response.status_code == 200:
+            return response.json()['id']
+        else:
+            return None
+    except:
+        return None
+
 def get_media_bytes(media_id):
     try:
         url = f"https://graph.facebook.com/v18.0/{media_id}"
@@ -145,16 +165,29 @@ def get_media_bytes(media_id):
         if 'url' in r: return requests.get(r['url'], headers=headers).content
     except: return None
 
-def enviar_mensagem_api(telefone, texto, tipo="text", template_name=None):
+def enviar_mensagem_api(telefone, conteudo, tipo="text", template_name=None):
+    # conteudo: pode ser texto ou ID da mídia
     tel = ''.join(filter(str.isdigit, str(telefone)))
     if len(tel) == 13 and tel.startswith("55"): tel = tel[:4] + tel[5:]
+    
     url = f"https://graph.facebook.com/v18.0/{st.secrets['META_PHONE_ID']}/messages"
     headers = {"Authorization": f"Bearer {st.secrets['META_TOKEN']}", "Content-Type": "application/json"}
+    
     payload = {"messaging_product": "whatsapp", "to": tel, "type": tipo}
     cost = 0.0
-    if tipo == 'text': payload['text'] = {"body": texto}
-    elif tipo == 'template': 
-        payload['template'] = {"name": template_name, "language": {"code": "pt_BR"}}; cost = 0.05
+    
+    if tipo == 'text':
+        payload['text'] = {"body": conteudo}
+    elif tipo == 'template':
+        payload['template'] = {"name": template_name, "language": {"code": "pt_BR"}}
+        cost = 0.05
+    elif tipo == 'image':
+        payload['image'] = {"id": conteudo}
+    elif tipo == 'document':
+        payload['document'] = {"id": conteudo, "filename": "Arquivo Anexo"}
+    elif tipo == 'audio':
+        payload['audio'] = {"id": conteudo}
+        
     try:
         resp = requests.post(url, headers=headers, json=payload)
         return resp.status_code, resp.json(), cost
@@ -179,13 +212,12 @@ def excluir_rr(rid):
 if "usuario" not in st.session_state: st.session_state.usuario = None
 if "pagina" not in st.session_state: st.session_state.pagina = "chat"
 
-# --- LOGIN (ALTERADO PARA "LOGIN") ---
+# --- LOGIN ---
 if st.session_state.usuario is None:
     c1,c2,c3 = st.columns([1,2,1])
     with c2:
         st.title("🔐 SempreChat")
         with st.form("login"):
-            # AQUI: Mudei o label para "Login"
             email = st.text_input("Login")
             senha = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar"):
@@ -248,7 +280,6 @@ else:
                 if st.button("🔴 Fim", use_container_width=True): 
                     encerrar_atendimento(st.session_state.chat_ativo); del st.session_state['chat_ativo']; st.success("Fim"); st.rerun()
 
-            # AQUI: Mudei para "Perfil do Cliente"
             with st.expander(f"📝 Perfil do Cliente (Cód: {cli[2] if cli[2] else '--'})"):
                 with st.form("fc"):
                     novo_nome_cliente = st.text_input("Nome do Cliente", value=cli[0])
@@ -262,23 +293,54 @@ else:
 
             # MENSAGENS
             msgs = carregar_mensagens(st.session_state.chat_ativo)
-            with st.container(height=450):
+            with st.container(height=400):
                 if msgs.empty: st.info("Início da conversa.")
                 for _, r in msgs.iterrows():
                     cls = "chat-bubble-cliente" if r['remetente']=='cliente' else "chat-bubble-empresa"
                     h = r['data_envio'].strftime('%H:%M')
                     cnt = f"<span>{r['texto']}</span>" if r['texto'] and r['texto']!="None" else ""
                     st.markdown(f"""<div class="{cls}">{cnt}<span class="chat-time">{h}</span></div>""", unsafe_allow_html=True)
-                    if r['tipo'] in ['image','audio','voice'] and r['url_media']:
+                    if r['tipo'] in ['image','audio','voice','document'] and r['url_media']:
                         dt = get_media_bytes(r['url_media'])
                         if dt:
                             cl_a, cl_b, cl_c = st.columns([1,2,1])
                             tc = cl_c if r['remetente']=='empresa' else cl_a
                             with tc:
-                                if r['tipo']=='image': st.image(dt, width=150)
-                                else: st.audio(dt)
+                                if r['tipo']=='image': st.image(dt, width=200)
+                                elif r['tipo']=='audio': st.audio(dt)
+                                elif r['tipo']=='document': st.download_button("📄 Baixar Arquivo", dt, file_name="anexo.pdf")
 
-            # INPUT AREA
+            # --- ÁREA DE ENVIO DE ARQUIVOS ---
+            with st.expander("📎 Anexar Arquivo (Foto, PDF ou Áudio)"):
+                uploaded_file = st.file_uploader("Escolha o arquivo", type=['png', 'jpg', 'jpeg', 'pdf', 'mp3', 'ogg', 'wav'])
+                if uploaded_file is not None:
+                    if st.button("Enviar Arquivo"):
+                        with st.spinner("Enviando para o WhatsApp..."):
+                            # Define tipo
+                            mime = uploaded_file.type
+                            tipo_msg = "document"
+                            if "image" in mime: tipo_msg = "image"
+                            elif "audio" in mime: tipo_msg = "audio"
+                            
+                            # Upload Meta
+                            media_id = upload_para_meta(uploaded_file, mime)
+                            
+                            if media_id:
+                                # Envia Msg
+                                c, r, co = enviar_mensagem_api(cli[1], media_id, tipo=tipo_msg)
+                                if c in [200, 201]:
+                                    with engine.connect() as conn:
+                                        conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, url_media) VALUES (:cid, 'empresa', :txt, :tipo, :url)"), 
+                                                     {"cid":st.session_state.chat_ativo, "txt":f"Arquivo: {uploaded_file.name}", "tipo":tipo_msg, "url":media_id})
+                                        conn.commit()
+                                    st.success("Enviado!")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Erro Meta: {r}")
+                            else:
+                                st.error("Erro ao fazer upload do arquivo.")
+
+            # --- ÁREA DE TEXTO ---
             rr = listar_rr(); rrd = {r[1]:r[2] for _,r in rr.iterrows()}
             rr_sel = st.selectbox("⚡ Usar Resposta Rápida", ["--"]+list(rrd.keys()))
             
@@ -332,7 +394,6 @@ else:
         tab1, tab2, tab3 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô"])
         with tab1:
             with st.form("nu"):
-                # AQUI: Mudei para Login também
                 n = st.text_input("Nome"); e = st.text_input("Login"); s = st.text_input("Senha"); f = st.selectbox("Função", ["vendedor","admin"])
                 if st.form_submit_button("Cadastrar"): 
                     b,m = criar_usuario(n,e,s,f); 
