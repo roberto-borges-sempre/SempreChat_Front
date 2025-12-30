@@ -4,15 +4,13 @@ from sqlalchemy import create_engine, text
 import requests
 import time
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
 # --- ESTILO VISUAL ---
 st.markdown("""
 <style>
     .stApp { background-color: #efeae2; }
-    
-    /* Balões de Chat */
     .chat-bubble-cliente {
         background-color: #ffffff; color: #000; padding: 10px 15px;
         border-radius: 0px 15px 15px 15px; margin: 5px 0; max-width: 75%;
@@ -24,18 +22,12 @@ st.markdown("""
         float: right; clear: both; box-shadow: 0 1px 1px rgba(0,0,0,0.1); text-align: left;
     }
     .chat-time { display: block; font-size: 11px; color: #999; margin-top: 4px; text-align: right; }
-    
-    /* === CAIXA DE TEXTO === */
     .stChatInputContainer { padding-bottom: 20px !important; }
     textarea[data-testid="stChatInputTextArea"] {
         min-height: 50px !important; height: auto !important;
         font-size: 16px !important; align-content: center !important;
     }
-    
-    /* Ajuste do Uploader para parecer um anexo discreto */
-    div[data-testid="stExpander"] {
-        border: none; box-shadow: none; background-color: transparent;
-    }
+    div[data-testid="stExpander"] { border: none; box-shadow: none; background-color: transparent; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -50,7 +42,7 @@ except Exception as e:
     st.error(f"Erro Conexão DB: {e}"); st.stop()
 
 # =======================
-# 🛠️ FUNÇÕES DE BANCO
+# 🛠️ FUNÇÕES
 # =======================
 
 @st.cache_data(ttl=60) 
@@ -75,14 +67,12 @@ def carregar_fila(admin=False, usuario_id=None):
         return pd.read_sql(query, conn)
 
 def carregar_mensagens(cid):
-    # ATUALIZADO: Agora busca o 'id' da mensagem também para usar como chave única
-    with engine.connect() as conn: 
-        return pd.read_sql(text("SELECT id, remetente, texto, tipo, url_media, data_envio FROM mensagens WHERE contato_id = :cid ORDER BY data_envio ASC"), conn, params={"cid":cid})
+    with engine.connect() as conn: return pd.read_sql(text("SELECT id, remetente, texto, tipo, url_media, data_envio FROM mensagens WHERE contato_id = :cid ORDER BY data_envio ASC"), conn, params={"cid":cid})
 
 def carregar_info_cliente(cid):
     with engine.connect() as conn: return conn.execute(text("SELECT nome, whatsapp_id, codigo_cliente, cpf_cnpj, notas_internas FROM contatos WHERE id=:id"), {"id":cid}).fetchone()
 
-# --- AÇÕES ---
+# --- AÇÕES CRUD ---
 def criar_usuario(n, e, s, f):
     try:
         with engine.connect() as conn:
@@ -136,28 +126,38 @@ def salvar_msg_boas_vindas(txt):
             conn.execute(text("INSERT INTO configuracoes (chave, valor) VALUES ('msg_boas_vindas', :v) ON CONFLICT (chave) DO UPDATE SET valor = :v"), {"v":txt})
             conn.commit()
         return True, "Salvo!"
-    except Exception as e:
-        return False, f"Erro Banco: {e}"
+    except Exception as e: return False, f"Erro: {e}"
+
+# --- FUNÇÕES TEMPLATES ---
+def criar_template(nome_tecnico):
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("INSERT INTO templates (nome_tecnico, idioma) VALUES (:n, 'pt_BR')"), {"n":nome_tecnico})
+            conn.commit()
+        return True, "Template Cadastrado!"
+    except Exception as e: return False, str(e)
+
+def listar_templates():
+    try:
+        with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM templates ORDER BY nome_tecnico"), conn)
+    except: return pd.DataFrame()
+
+def excluir_template(tid):
+    with engine.connect() as conn:
+        conn.execute(text("DELETE FROM templates WHERE id=:id"), {"id":tid})
+        conn.commit()
 
 # --- META API ---
 def upload_para_meta(uploaded_file, mime_type):
-    """Envia o arquivo para a Meta e retorna o ID"""
     url = f"https://graph.facebook.com/v18.0/{st.secrets['META_PHONE_ID']}/media"
     headers = {"Authorization": f"Bearer {st.secrets['META_TOKEN']}"}
-    
-    files = {
-        'file': (uploaded_file.name, uploaded_file.getvalue(), mime_type)
-    }
+    files = {'file': (uploaded_file.name, uploaded_file.getvalue(), mime_type)}
     data = {'messaging_product': 'whatsapp'}
-    
     try:
         response = requests.post(url, headers=headers, files=files, data=data)
-        if response.status_code == 200:
-            return response.json()['id']
-        else:
-            return None
-    except:
-        return None
+        if response.status_code == 200: return response.json()['id']
+        else: return None
+    except: return None
 
 def get_media_bytes(media_id):
     try:
@@ -168,34 +168,27 @@ def get_media_bytes(media_id):
     except: return None
 
 def enviar_mensagem_api(telefone, conteudo, tipo="text", template_name=None):
-    # conteudo: pode ser texto ou ID da mídia
     tel = ''.join(filter(str.isdigit, str(telefone)))
     if len(tel) == 13 and tel.startswith("55"): tel = tel[:4] + tel[5:]
-    
     url = f"https://graph.facebook.com/v18.0/{st.secrets['META_PHONE_ID']}/messages"
     headers = {"Authorization": f"Bearer {st.secrets['META_TOKEN']}", "Content-Type": "application/json"}
-    
     payload = {"messaging_product": "whatsapp", "to": tel, "type": tipo}
     cost = 0.0
     
-    if tipo == 'text':
-        payload['text'] = {"body": conteudo}
+    if tipo == 'text': payload['text'] = {"body": conteudo}
     elif tipo == 'template':
         payload['template'] = {"name": template_name, "language": {"code": "pt_BR"}}
         cost = 0.05
-    elif tipo == 'image':
-        payload['image'] = {"id": conteudo}
-    elif tipo == 'document':
-        payload['document'] = {"id": conteudo, "filename": "Arquivo Anexo"}
-    elif tipo == 'audio':
-        payload['audio'] = {"id": conteudo}
+    elif tipo == 'image': payload['image'] = {"id": conteudo}
+    elif tipo == 'document': payload['document'] = {"id": conteudo, "filename": "Anexo"}
+    elif tipo == 'audio': payload['audio'] = {"id": conteudo}
         
     try:
         resp = requests.post(url, headers=headers, json=payload)
         return resp.status_code, resp.json(), cost
     except Exception as e: return 500, str(e), 0.0
 
-# --- RESPOSTAS RÁPIDAS ---
+# --- RR ---
 def criar_rr(t, tx, uid):
     with engine.connect() as conn:
         conn.execute(text("INSERT INTO respostas_rapidas (titulo, texto, criado_por) VALUES (:t, :tx, :u)"), {"t":t, "tx":tx, "u":uid})
@@ -220,8 +213,7 @@ if st.session_state.usuario is None:
     with c2:
         st.title("🔐 SempreChat")
         with st.form("login"):
-            email = st.text_input("Login")
-            senha = st.text_input("Senha", type="password")
+            email = st.text_input("Login"); senha = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar"):
                 def verif(e, s):
                     with engine.connect() as conn: return conn.execute(text("SELECT id, nome, funcao FROM usuarios WHERE email=:e AND senha=:s AND ativo=TRUE"), {"e":e,"s":s}).fetchone()
@@ -229,8 +221,7 @@ if st.session_state.usuario is None:
                     u = verif(email, senha)
                     if u: st.session_state.usuario = {"id":u[0], "nome":u[1], "funcao":u[2]}; st.rerun()
                     else: st.error("Login inválido")
-                except Exception as e:
-                    st.error("Erro: Banco desconectado!")
+                except Exception as e: st.error("Erro Conexão Banco")
 else:
     # --- SIDEBAR ---
     with st.sidebar:
@@ -257,8 +248,7 @@ else:
                     
                     if st.button(d, key=f"c_{r['id']}", use_container_width=True):
                         st.session_state.chat_ativo = r['id']; st.rerun()
-            except Exception as e:
-                st.error("Erro Fila"); st.code(str(e))
+            except Exception as e: st.error("Erro Fila")
 
     # --- CHAT ---
     if st.session_state.pagina == "chat":
@@ -268,10 +258,7 @@ else:
             
             # HEADER
             c1, c2, c3 = st.columns([3, 1, 1])
-            with c1: 
-                st.title(cli[0])
-                st.code(cli[1], language="text")
-            
+            with c1: st.title(cli[0]); st.code(cli[1], language="text")
             with c2: 
                 us = listar_usuarios_ativos()
                 ud = {u[1]:u[0] for _,u in us.iterrows()}
@@ -282,18 +269,16 @@ else:
                 if st.button("🔴 Fim", use_container_width=True): 
                     encerrar_atendimento(st.session_state.chat_ativo); del st.session_state['chat_ativo']; st.success("Fim"); st.rerun()
 
-            with st.expander(f"📝 Perfil do Cliente (Cód: {cli[2] if cli[2] else '--'})"):
+            with st.expander(f"📝 Perfil (Cód: {cli[2] if cli[2] else '--'})"):
                 with st.form("fc"):
-                    novo_nome_cliente = st.text_input("Nome do Cliente", value=cli[0])
-                    nc = st.text_input("Código / CPF / CNPJ", value=cli[2] if cli[2] else "")
+                    ncli = st.text_input("Nome", value=cli[0])
+                    nc = st.text_input("Código/CPF", value=cli[2] if cli[2] else "")
                     nn = st.text_area("Notas", value=cli[4] if cli[4] else "")
-                    if st.form_submit_button("💾 Salvar Dados"): 
-                        atualizar_cliente_completo(st.session_state.chat_ativo, novo_nome_cliente, nc, nn)
-                        st.success("Atualizado!"); st.rerun()
+                    if st.form_submit_button("Salvar"): atualizar_cliente_completo(st.session_state.chat_ativo, ncli, nc, nn); st.success("Salvo!"); st.rerun()
 
             st.divider()
 
-            # MENSAGENS
+            # MSGS
             msgs = carregar_mensagens(st.session_state.chat_ativo)
             with st.container(height=400):
                 if msgs.empty: st.info("Início da conversa.")
@@ -302,7 +287,6 @@ else:
                     h = r['data_envio'].strftime('%H:%M')
                     cnt = f"<span>{r['texto']}</span>" if r['texto'] and r['texto']!="None" else ""
                     st.markdown(f"""<div class="{cls}">{cnt}<span class="chat-time">{h}</span></div>""", unsafe_allow_html=True)
-                    
                     if r['tipo'] in ['image','audio','voice','document'] and r['url_media']:
                         dt = get_media_bytes(r['url_media'])
                         if dt:
@@ -311,74 +295,73 @@ else:
                             with tc:
                                 if r['tipo']=='image': st.image(dt, width=200)
                                 elif r['tipo']=='audio': st.audio(dt)
-                                # CORREÇÃO AQUI: Adicionado key única para cada botão usando o ID da mensagem
-                                elif r['tipo']=='document': st.download_button("📄 Baixar Arquivo", dt, file_name="anexo.pdf", key=f"file_{r['id']}")
+                                elif r['tipo']=='document': st.download_button("📄 Baixar", dt, file_name="anexo.pdf", key=f"f_{r['id']}")
 
-            # --- ÁREA DE ENVIO DE ARQUIVOS ---
-            with st.expander("📎 Anexar Arquivo (Foto, PDF ou Áudio)"):
-                uploaded_file = st.file_uploader("Escolha o arquivo", type=['png', 'jpg', 'jpeg', 'pdf', 'mp3', 'ogg', 'wav'])
-                if uploaded_file is not None:
-                    if st.button("Enviar Arquivo"):
-                        with st.spinner("Enviando para o WhatsApp..."):
-                            mime = uploaded_file.type
-                            tipo_msg = "document"
-                            if "image" in mime: tipo_msg = "image"
-                            elif "audio" in mime: tipo_msg = "audio"
-                            
-                            media_id = upload_para_meta(uploaded_file, mime)
-                            
-                            if media_id:
-                                c, r, co = enviar_mensagem_api(cli[1], media_id, tipo=tipo_msg)
-                                if c in [200, 201]:
-                                    with engine.connect() as conn:
-                                        conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, url_media) VALUES (:cid, 'empresa', :txt, :tipo, :url)"), 
-                                                     {"cid":st.session_state.chat_ativo, "txt":f"Arquivo: {uploaded_file.name}", "tipo":tipo_msg, "url":media_id})
-                                        conn.commit()
-                                    st.success("Enviado!")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Erro Meta: {r}")
-                            else:
-                                st.error("Erro ao fazer upload do arquivo.")
+            # ANEXO
+            with st.expander("📎 Anexar"):
+                uploaded_file = st.file_uploader("Arquivo", type=['png', 'jpg', 'pdf', 'mp3', 'ogg', 'wav'])
+                if uploaded_file and st.button("Enviar Arq"):
+                    with st.spinner("Enviando..."):
+                        mime = uploaded_file.type
+                        tmsg = "document"
+                        if "image" in mime: tmsg = "image"
+                        elif "audio" in mime: tmsg = "audio"
+                        mid = upload_para_meta(uploaded_file, mime)
+                        if mid:
+                            c, r, co = enviar_mensagem_api(cli[1], mid, tipo=tmsg)
+                            if c in [200, 201]:
+                                with engine.connect() as conn:
+                                    conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, url_media) VALUES (:cid, 'empresa', :txt, :tipo, :url)"), {"cid":st.session_state.chat_ativo, "txt":f"Arq: {uploaded_file.name}", "tipo":tmsg, "url":mid})
+                                    conn.commit()
+                                st.rerun()
+                            else: st.error(f"Erro Meta: {r}")
 
-            # --- ÁREA DE TEXTO ---
+            # INPUT
             rr = listar_rr(); rrd = {r[1]:r[2] for _,r in rr.iterrows()}
-            rr_sel = st.selectbox("⚡ Usar Resposta Rápida", ["--"]+list(rrd.keys()))
-            
+            rr_sel = st.selectbox("⚡ Rápida", ["--"]+list(rrd.keys()))
             if rr_sel != "--":
-                txt_rr = rrd[rr_sel]
-                st.info(f"Enviar: {txt_rr}")
-                if st.button("🚀 Enviar Rápida"):
-                    c,r,co = enviar_mensagem_api(cli[1], txt_rr)
+                tr = rrd[rr_sel]; st.info(f"Enviar: {tr}")
+                if st.button("🚀 Enviar"):
+                    c,r,co = enviar_mensagem_api(cli[1], tr)
                     if c in [200,201]:
                         with engine.connect() as conn:
-                            conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'text',0)"), {"cid":st.session_state.chat_ativo, "t":txt_rr})
+                            conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'text',0)"), {"cid":st.session_state.chat_ativo, "t":tr})
                             conn.commit()
                         st.rerun()
             
-            if prompt := st.chat_input("Digite sua mensagem..."):
+            if prompt := st.chat_input("Mensagem..."):
                 c,r,co = enviar_mensagem_api(cli[1], prompt)
                 if c in [200,201]:
                     with engine.connect() as conn:
                         conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'text',0)"), {"cid":st.session_state.chat_ativo, "t":prompt})
                         conn.commit()
                     st.rerun()
-                else: st.error(f"Erro: {r}")
 
-            with st.expander("📢 Template"):
-                tp = st.text_input("Nome Template")
-                if st.button("Enviar Tpl"):
-                    c,r,co = enviar_mensagem_api(cli[1], "", "template", tp)
-                    if c in [200,201]:
-                        with engine.connect() as conn:
-                            conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":f"[TPL: {tp}]", "c":co})
-                            conn.commit()
-                        st.success("Enviado"); st.rerun()
+            # ÁREA DE TEMPLATES (MODIFICADA)
+            with st.expander("📢 Enviar Template (Furar 24h)"):
+                # Carrega templates do banco
+                df_tpl = listar_templates()
+                if not df_tpl.empty:
+                    tpl_list = df_tpl['nome_tecnico'].tolist()
+                    tpl_sel = st.selectbox("Selecione o Template", ["--"] + tpl_list)
+                    
+                    if tpl_sel != "--":
+                        if st.button(f"Enviar Template '{tpl_sel}'"):
+                            c,r,co = enviar_mensagem_api(cli[1], "", "template", tpl_sel)
+                            if c in [200,201]:
+                                with engine.connect() as conn:
+                                    conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":f"[TPL: {tpl_sel}]", "c":co})
+                                    conn.commit()
+                                st.success("Enviado"); st.rerun()
+                            else: st.error(f"Erro: {r}")
+                else:
+                    st.warning("Nenhum template cadastrado no Admin.")
+
         else: st.info("👈 Selecione um cliente.")
 
     # --- RESPOSTAS ---
     elif st.session_state.pagina == "respostas":
-        st.header("⚡ Gerenciar Respostas")
+        st.header("⚡ Respostas Rápidas")
         with st.form("nrr"):
             t = st.text_input("Título"); tx = st.text_area("Texto")
             if st.form_submit_button("Criar"): criar_rr(t, tx, st.session_state.usuario['id']); st.rerun()
@@ -392,7 +375,8 @@ else:
     # --- ADMIN ---
     elif st.session_state.pagina == "admin":
         st.header("⚙️ Admin")
-        tab1, tab2, tab3 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô"])
+        tab1, tab2, tab3, tab4 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô", "📢 Templates Meta"])
+        
         with tab1:
             with st.form("nu"):
                 n = st.text_input("Nome"); e = st.text_input("Login"); s = st.text_input("Senha"); f = st.selectbox("Função", ["vendedor","admin"])
@@ -416,4 +400,25 @@ else:
                     sucesso, retorno = salvar_msg_boas_vindas(txt)
                     if sucesso: st.success("Ok")
                     else: st.error(f"Erro: {retorno}")
+        
+        # --- ABA NOVA DE TEMPLATES ---
+        with tab4:
+            st.info("Cadastre aqui os nomes TÉCNICOS dos templates aprovados na Meta.")
+            with st.form("ntpl"):
+                nt = st.text_input("Nome Técnico (ex: hello_world)")
+                if st.form_submit_button("Cadastrar Template"):
+                    b, m = criar_template(nt)
+                    if b: st.success(m); st.rerun()
+                    else: st.error(m)
+            
+            st.divider()
+            dft = listar_templates()
+            if not dft.empty:
+                for _, row in dft.iterrows():
+                    c1, c2 = st.columns([4, 1])
+                    c1.code(row['nome_tecnico'])
+                    if c2.button("🗑️", key=f"dt_{row['id']}"):
+                        excluir_template(row['id'])
+                        st.rerun()
+
         if st.button("Voltar"): st.session_state.pagina="chat"; st.rerun()
