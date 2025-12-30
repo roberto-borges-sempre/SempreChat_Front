@@ -7,12 +7,10 @@ import time
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
-# --- ESTILO VISUAL (AGORA COM INPUT MAIOR) ---
+# --- ESTILO VISUAL (INPUT MAIOR) ---
 st.markdown("""
 <style>
     .stApp { background-color: #efeae2; }
-    
-    /* Balões de Chat */
     .chat-bubble-cliente {
         background-color: #ffffff; color: #000; padding: 10px 15px;
         border-radius: 0px 15px 15px 15px; margin: 5px 0; max-width: 75%;
@@ -25,16 +23,12 @@ st.markdown("""
     }
     .chat-time { display: block; font-size: 11px; color: #999; margin-top: 4px; text-align: right; }
     
-    /* === AUMENTAR CAIXA DE TEXTO (PEDIDO DO USUÁRIO) === */
-    /* Aumenta a altura da área de digitação */
+    /* CAIXA DE TEXTO MAIOR */
     textarea[data-testid="stChatInputTextArea"] {
-        min-height: 80px !important; /* Altura mínima maior */
-        font-size: 16px !important;  /* Letra maior para ler melhor */
+        min-height: 80px !important; 
+        font-size: 16px !important;
     }
-    /* Ajusta o container para não cortar o botão */
-    div[data-testid="stChatInput"] {
-        padding-bottom: 15px !important;
-    }
+    div[data-testid="stChatInput"] { padding-bottom: 15px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -121,18 +115,24 @@ def encerrar_atendimento(cid):
         conn.commit()
     carregar_fila.clear()
 
-# --- CONFIGURAÇÃO ROBÔ ---
+# --- CONFIGURAÇÃO ROBÔ (BLINDADO) ---
 def pegar_msg_boas_vindas():
+    # Tenta ler, se der erro (tabela não existe), retorna vazio sem travar
     try:
         with engine.connect() as conn:
             res = conn.execute(text("SELECT valor FROM configuracoes WHERE chave='msg_boas_vindas'")).fetchone()
             return res[0] if res else ""
-    except: return "" 
+    except Exception:
+        return "" 
 
 def salvar_msg_boas_vindas(txt):
-    with engine.connect() as conn:
-        conn.execute(text("INSERT INTO configuracoes (chave, valor) VALUES ('msg_boas_vindas', :v) ON CONFLICT (chave) DO UPDATE SET valor = :v"), {"v":txt})
-        conn.commit()
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("INSERT INTO configuracoes (chave, valor) VALUES ('msg_boas_vindas', :v) ON CONFLICT (chave) DO UPDATE SET valor = :v"), {"v":txt})
+            conn.commit()
+        return True, "Salvo!"
+    except Exception as e:
+        return False, f"Erro de Tabela: {e}"
 
 # --- META API ---
 def get_media_bytes(media_id):
@@ -187,9 +187,12 @@ if st.session_state.usuario is None:
             if st.form_submit_button("Entrar"):
                 def verif(e, s):
                     with engine.connect() as conn: return conn.execute(text("SELECT id, nome, funcao FROM usuarios WHERE email=:e AND senha=:s AND ativo=TRUE"), {"e":e,"s":s}).fetchone()
-                u = verif(email, senha)
-                if u: st.session_state.usuario = {"id":u[0], "nome":u[1], "funcao":u[2]}; st.rerun()
-                else: st.error("Login inválido")
+                try:
+                    u = verif(email, senha)
+                    if u: st.session_state.usuario = {"id":u[0], "nome":u[1], "funcao":u[2]}; st.rerun()
+                    else: st.error("Login inválido")
+                except Exception as e:
+                    st.error(f"Erro ao conectar no banco: {e}")
 else:
     # --- SIDEBAR ---
     with st.sidebar:
@@ -217,7 +220,7 @@ else:
                     if st.button(d, key=f"c_{r['id']}", use_container_width=True):
                         st.session_state.chat_ativo = r['id']; st.rerun()
             except Exception as e:
-                st.error("Erro Fila (Dê Reboot no App)"); st.code(str(e))
+                st.error("Erro Fila"); st.code(str(e))
 
     # --- CHAT ---
     if st.session_state.pagina == "chat":
@@ -338,9 +341,12 @@ else:
                 if st.form_submit_button("Salvar"): editar_usuario(sel_uid, nn, ns if ns else None); st.success("Salvo!"); time.sleep(1); st.rerun()
             if st.button("Excluir", type="primary"): excluir_usuario(sel_uid); st.rerun()
         with tab3:
+            # BLINDADO: Se der erro, retorna vazio e avisa
             msg = pegar_msg_boas_vindas()
             with st.form("cr"):
                 txt = st.text_area("Saudação Automática (Robô)", value=msg)
-                if st.form_submit_button("Salvar"): salvar_msg_boas_vindas(txt); st.success("Ok")
-            st.info("⚠️ Se você ver erro aqui, dê um Reboot no App (Manage app > Reboot).")
+                if st.form_submit_button("Salvar"): 
+                    sucesso, retorno = salvar_msg_boas_vindas(txt)
+                    if sucesso: st.success("Ok")
+                    else: st.error(f"Erro ao salvar no banco: {retorno}")
         if st.button("Voltar"): st.session_state.pagina="chat"; st.rerun()
