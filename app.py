@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 import requests
 import time
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
 # --- ESTILO VISUAL ---
@@ -42,7 +42,7 @@ except Exception as e:
     st.error(f"Erro Conexão DB: {e}"); st.stop()
 
 # =======================
-# 🛠️ FUNÇÕES
+# 🛠️ FUNÇÕES DE BANCO
 # =======================
 
 @st.cache_data(ttl=60) 
@@ -128,7 +128,21 @@ def salvar_msg_boas_vindas(txt):
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
 
-# --- FUNÇÕES TEMPLATES ---
+# --- FUNÇÕES TEMPLATES (COM AUTO-REPARO) ---
+def forcar_criacao_tabela_templates():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS templates (
+                    id SERIAL PRIMARY KEY,
+                    nome_tecnico TEXT UNIQUE NOT NULL,
+                    idioma TEXT DEFAULT 'pt_BR'
+                );
+            """))
+            conn.commit()
+        return True, "Tabela recriada com sucesso!"
+    except Exception as e: return False, str(e)
+
 def criar_template(nome_tecnico):
     try:
         with engine.connect() as conn:
@@ -140,7 +154,7 @@ def criar_template(nome_tecnico):
 def listar_templates():
     try:
         with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM templates ORDER BY nome_tecnico"), conn)
-    except: return pd.DataFrame()
+    except: return pd.DataFrame() # Retorna vazio se der erro
 
 def excluir_template(tid):
     with engine.connect() as conn:
@@ -213,7 +227,8 @@ if st.session_state.usuario is None:
     with c2:
         st.title("🔐 SempreChat")
         with st.form("login"):
-            email = st.text_input("Login"); senha = st.text_input("Senha", type="password")
+            email = st.text_input("Login")
+            senha = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar"):
                 def verif(e, s):
                     with engine.connect() as conn: return conn.execute(text("SELECT id, nome, funcao FROM usuarios WHERE email=:e AND senha=:s AND ativo=TRUE"), {"e":e,"s":s}).fetchone()
@@ -337,16 +352,14 @@ else:
                         conn.commit()
                     st.rerun()
 
-            # ÁREA DE TEMPLATES (MODIFICADA)
+            # ÁREA DE TEMPLATES
             with st.expander("📢 Enviar Template (Furar 24h)"):
-                # Carrega templates do banco
                 df_tpl = listar_templates()
                 if not df_tpl.empty:
                     tpl_list = df_tpl['nome_tecnico'].tolist()
                     tpl_sel = st.selectbox("Selecione o Template", ["--"] + tpl_list)
-                    
                     if tpl_sel != "--":
-                        if st.button(f"Enviar Template '{tpl_sel}'"):
+                        if st.button(f"Enviar '{tpl_sel}'"):
                             c,r,co = enviar_mensagem_api(cli[1], "", "template", tpl_sel)
                             if c in [200,201]:
                                 with engine.connect() as conn:
@@ -354,14 +367,13 @@ else:
                                     conn.commit()
                                 st.success("Enviado"); st.rerun()
                             else: st.error(f"Erro: {r}")
-                else:
-                    st.warning("Nenhum template cadastrado no Admin.")
+                else: st.warning("Nenhum template cadastrado.")
 
         else: st.info("👈 Selecione um cliente.")
 
     # --- RESPOSTAS ---
     elif st.session_state.pagina == "respostas":
-        st.header("⚡ Respostas Rápidas")
+        st.header("⚡ Gerenciar Respostas")
         with st.form("nrr"):
             t = st.text_input("Título"); tx = st.text_area("Texto")
             if st.form_submit_button("Criar"): criar_rr(t, tx, st.session_state.usuario['id']); st.rerun()
@@ -401,9 +413,14 @@ else:
                     if sucesso: st.success("Ok")
                     else: st.error(f"Erro: {retorno}")
         
-        # --- ABA NOVA DE TEMPLATES ---
         with tab4:
             st.info("Cadastre aqui os nomes TÉCNICOS dos templates aprovados na Meta.")
+            # BOTÃO DE REPARO DE EMERGÊNCIA
+            if st.button("⚠️ Tabela não existe? Clique para reparar!"):
+                ok, msg_db = forcar_criacao_tabela_templates()
+                if ok: st.success(msg_db)
+                else: st.error(msg_db)
+
             with st.form("ntpl"):
                 nt = st.text_input("Nome Técnico (ex: hello_world)")
                 if st.form_submit_button("Cadastrar Template"):
