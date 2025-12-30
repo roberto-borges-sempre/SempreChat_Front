@@ -7,7 +7,7 @@ import time
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
-# --- ESTILO VISUAL (CORRIGIDO: CAIXA DE TEXTO SEM CORTAR) ---
+# --- ESTILO VISUAL ---
 st.markdown("""
 <style>
     .stApp { background-color: #efeae2; }
@@ -25,17 +25,13 @@ st.markdown("""
     }
     .chat-time { display: block; font-size: 11px; color: #999; margin-top: 4px; text-align: right; }
     
-    /* === CAIXA DE TEXTO MAIOR (SEM CORTAR LETRAS) === */
-    /* Aumenta a área clicável e visual */
-    .stChatInputContainer {
-        padding-bottom: 20px !important;
-    }
-    /* Ajusta a caixa de texto em si */
+    /* === CAIXA DE TEXTO MAIOR === */
+    .stChatInputContainer { padding-bottom: 20px !important; }
     textarea[data-testid="stChatInputTextArea"] {
-        min-height: 50px !important;    /* Altura mínima boa */
-        height: auto !important;        /* Deixa crescer se digitar muito */
-        font-size: 16px !important;     /* Letra legível */
-        align-content: center !important; /* Centraliza texto verticalmente */
+        min-height: 50px !important;
+        height: auto !important;
+        font-size: 16px !important;
+        align-content: center !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -125,13 +121,11 @@ def encerrar_atendimento(cid):
 
 # --- CONFIGURAÇÃO ROBÔ ---
 def pegar_msg_boas_vindas():
-    # Tenta ler, se der erro (tabela não existe), retorna vazio sem travar o app
     try:
         with engine.connect() as conn:
             res = conn.execute(text("SELECT valor FROM configuracoes WHERE chave='msg_boas_vindas'")).fetchone()
             return res[0] if res else ""
-    except Exception:
-        return "" 
+    except Exception: return "" 
 
 def salvar_msg_boas_vindas(txt):
     try:
@@ -140,7 +134,7 @@ def salvar_msg_boas_vindas(txt):
             conn.commit()
         return True, "Salvo!"
     except Exception as e:
-        return False, f"Erro Banco (Rode o setup): {e}"
+        return False, f"Erro Banco: {e}"
 
 # --- META API ---
 def get_media_bytes(media_id):
@@ -185,13 +179,15 @@ def excluir_rr(rid):
 if "usuario" not in st.session_state: st.session_state.usuario = None
 if "pagina" not in st.session_state: st.session_state.pagina = "chat"
 
-# --- LOGIN ---
+# --- LOGIN (ALTERADO PARA "LOGIN") ---
 if st.session_state.usuario is None:
     c1,c2,c3 = st.columns([1,2,1])
     with c2:
         st.title("🔐 SempreChat")
         with st.form("login"):
-            email = st.text_input("Email"); senha = st.text_input("Senha", type="password")
+            # AQUI: Mudei o label para "Login"
+            email = st.text_input("Login")
+            senha = st.text_input("Senha", type="password")
             if st.form_submit_button("Entrar"):
                 def verif(e, s):
                     with engine.connect() as conn: return conn.execute(text("SELECT id, nome, funcao FROM usuarios WHERE email=:e AND senha=:s AND ativo=TRUE"), {"e":e,"s":s}).fetchone()
@@ -200,7 +196,7 @@ if st.session_state.usuario is None:
                     if u: st.session_state.usuario = {"id":u[0], "nome":u[1], "funcao":u[2]}; st.rerun()
                     else: st.error("Login inválido")
                 except Exception as e:
-                    st.error("Erro: Rode o setup_banco!")
+                    st.error("Erro: Banco desconectado!")
 else:
     # --- SIDEBAR ---
     with st.sidebar:
@@ -252,7 +248,8 @@ else:
                 if st.button("🔴 Fim", use_container_width=True): 
                     encerrar_atendimento(st.session_state.chat_ativo); del st.session_state['chat_ativo']; st.success("Fim"); st.rerun()
 
-            with st.expander(f"📝 Editar Cadastro (Cód: {cli[2] if cli[2] else '--'})"):
+            # AQUI: Mudei para "Perfil do Cliente"
+            with st.expander(f"📝 Perfil do Cliente (Cód: {cli[2] if cli[2] else '--'})"):
                 with st.form("fc"):
                     novo_nome_cliente = st.text_input("Nome do Cliente", value=cli[0])
                     nc = st.text_input("Código / CPF / CNPJ", value=cli[2] if cli[2] else "")
@@ -335,6 +332,7 @@ else:
         tab1, tab2, tab3 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô"])
         with tab1:
             with st.form("nu"):
+                # AQUI: Mudei para Login também
                 n = st.text_input("Nome"); e = st.text_input("Login"); s = st.text_input("Senha"); f = st.selectbox("Função", ["vendedor","admin"])
                 if st.form_submit_button("Cadastrar"): 
                     b,m = criar_usuario(n,e,s,f); 
