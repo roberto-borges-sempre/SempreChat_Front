@@ -7,7 +7,7 @@ import time
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
-# --- ESTILO VISUAL ---
+# --- ESTILO VISUAL (AGORA COM INPUT MAIOR) ---
 st.markdown("""
 <style>
     .stApp { background-color: #efeae2; }
@@ -25,8 +25,16 @@ st.markdown("""
     }
     .chat-time { display: block; font-size: 11px; color: #999; margin-top: 4px; text-align: right; }
     
-    /* Ajuste para o chat_input ficar fixo e bonito */
-    .stChatInput { position: fixed; bottom: 0; }
+    /* === AUMENTAR CAIXA DE TEXTO (PEDIDO DO USUÁRIO) === */
+    /* Aumenta a altura da área de digitação */
+    textarea[data-testid="stChatInputTextArea"] {
+        min-height: 80px !important; /* Altura mínima maior */
+        font-size: 16px !important;  /* Letra maior para ler melhor */
+    }
+    /* Ajusta o container para não cortar o botão */
+    div[data-testid="stChatInput"] {
+        padding-bottom: 15px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,7 +60,7 @@ def listar_todos_usuarios():
 def listar_usuarios_ativos():
     with engine.connect() as conn: return pd.read_sql(text("SELECT id, nome FROM usuarios WHERE ativo=TRUE ORDER BY nome"), conn)
 
-@st.cache_data(ttl=2) # Cache rápido para fila
+@st.cache_data(ttl=2) 
 def carregar_fila(admin=False, usuario_id=None):
     with engine.connect() as conn:
         filtro = "" if admin else f"AND (c.vendedora_id = {usuario_id} OR c.vendedora_id IS NULL)"
@@ -94,7 +102,7 @@ def excluir_usuario(uid):
         conn.commit()
     listar_todos_usuarios.clear()
 
-# --- UPDATE CLIENTE (NOME, CODIGO, NOTAS) ---
+# --- UPDATE CLIENTE ---
 def atualizar_cliente_completo(cid, nome, codigo, notas):
     with engine.connect() as conn:
         conn.execute(text("UPDATE contatos SET nome=:nm, codigo_cliente=:c, notas_internas=:n WHERE id=:id"), {"nm":nome, "c":codigo, "n":notas, "id":cid})
@@ -113,13 +121,13 @@ def encerrar_atendimento(cid):
         conn.commit()
     carregar_fila.clear()
 
-# --- CONFIGURAÇÃO ROBÔ (Tabela pode não existir se não rodar setup) ---
+# --- CONFIGURAÇÃO ROBÔ ---
 def pegar_msg_boas_vindas():
     try:
         with engine.connect() as conn:
             res = conn.execute(text("SELECT valor FROM configuracoes WHERE chave='msg_boas_vindas'")).fetchone()
             return res[0] if res else ""
-    except: return "" # Evita erro se tabela não existir
+    except: return "" 
 
 def salvar_msg_boas_vindas(txt):
     with engine.connect() as conn:
@@ -168,8 +176,6 @@ def excluir_rr(rid):
 
 if "usuario" not in st.session_state: st.session_state.usuario = None
 if "pagina" not in st.session_state: st.session_state.pagina = "chat"
-# Estado para Resposta Rápida (RR)
-if "rr_texto" not in st.session_state: st.session_state.rr_texto = ""
 
 # --- LOGIN ---
 if st.session_state.usuario is None:
@@ -184,12 +190,12 @@ if st.session_state.usuario is None:
                 u = verif(email, senha)
                 if u: st.session_state.usuario = {"id":u[0], "nome":u[1], "funcao":u[2]}; st.rerun()
                 else: st.error("Login inválido")
-
 else:
     # --- SIDEBAR ---
     with st.sidebar:
         st.write(f"👤 **{st.session_state.usuario['nome']}**")
         st.caption(st.session_state.usuario['funcao'])
+        
         if st.button("💬 Chat", use_container_width=True): st.session_state.pagina = "chat"; st.rerun()
         if st.button("⚡ Respostas", use_container_width=True): st.session_state.pagina = "respostas"; st.rerun()
         if st.session_state.usuario['funcao']=='admin':
@@ -207,10 +213,11 @@ else:
                     d = f"🟢 {r['nome']}"
                     if is_adm and r['vendedora']: d = f"🔒 {r['vendedora']} | {r['nome']}"
                     if r['codigo_cliente']: d += f" ({r['codigo_cliente']})"
+                    
                     if st.button(d, key=f"c_{r['id']}", use_container_width=True):
                         st.session_state.chat_ativo = r['id']; st.rerun()
             except Exception as e:
-                st.error("Erro Fila (Rode /setup_banco)"); st.code(str(e))
+                st.error("Erro Fila (Dê Reboot no App)"); st.code(str(e))
 
     # --- CHAT ---
     if st.session_state.pagina == "chat":
@@ -218,11 +225,11 @@ else:
             cli = carregar_info_cliente(st.session_state.chat_ativo)
             if not cli: st.warning("Cliente sumiu"); st.stop()
             
-            # HEADER (NOME, TELEFONE E AÇÕES)
+            # HEADER
             c1, c2, c3 = st.columns([3, 1, 1])
             with c1: 
-                st.title(cli[0]) # Nome Grande
-                st.code(cli[1], language="text") # Telefone fácil de copiar
+                st.title(cli[0])
+                st.code(cli[1], language="text")
             
             with c2: 
                 us = listar_usuarios_ativos()
@@ -234,11 +241,9 @@ else:
                 if st.button("🔴 Fim", use_container_width=True): 
                     encerrar_atendimento(st.session_state.chat_ativo); del st.session_state['chat_ativo']; st.success("Fim"); st.rerun()
 
-            # CADASTRO EDITÁVEL (NOME E NOTAS)
             with st.expander(f"📝 Editar Cadastro (Cód: {cli[2] if cli[2] else '--'})"):
                 with st.form("fc"):
-                    # CAMPO NOVO: NOME DO CLIENTE (EDITÁVEL)
-                    novo_nome_cliente = st.text_input("Nome do Cliente (Apelido/Agenda)", value=cli[0])
+                    novo_nome_cliente = st.text_input("Nome do Cliente", value=cli[0])
                     nc = st.text_input("Código / CPF / CNPJ", value=cli[2] if cli[2] else "")
                     nn = st.text_area("Notas", value=cli[4] if cli[4] else "")
                     if st.form_submit_button("💾 Salvar Dados"): 
@@ -247,7 +252,7 @@ else:
 
             st.divider()
 
-            # ÁREA DE MENSAGENS (Scroll)
+            # MENSAGENS
             msgs = carregar_mensagens(st.session_state.chat_ativo)
             with st.container(height=450):
                 if msgs.empty: st.info("Início da conversa.")
@@ -255,9 +260,7 @@ else:
                     cls = "chat-bubble-cliente" if r['remetente']=='cliente' else "chat-bubble-empresa"
                     h = r['data_envio'].strftime('%H:%M')
                     cnt = f"<span>{r['texto']}</span>" if r['texto'] and r['texto']!="None" else ""
-                    
                     st.markdown(f"""<div class="{cls}">{cnt}<span class="chat-time">{h}</span></div>""", unsafe_allow_html=True)
-                    
                     if r['tipo'] in ['image','audio','voice'] and r['url_media']:
                         dt = get_media_bytes(r['url_media'])
                         if dt:
@@ -267,14 +270,10 @@ else:
                                 if r['tipo']=='image': st.image(dt, width=150)
                                 else: st.audio(dt)
 
-            # --- INPUT AREA (MODERNA COM CHAT_INPUT) ---
-            
-            # Seletor de Respostas Rápidas (Acima do input)
-            rr = listar_rr()
-            rrd = {r[1]:r[2] for _,r in rr.iterrows()}
+            # INPUT AREA
+            rr = listar_rr(); rrd = {r[1]:r[2] for _,r in rr.iterrows()}
             rr_sel = st.selectbox("⚡ Usar Resposta Rápida", ["--"]+list(rrd.keys()))
             
-            # Se selecionar RR, mostra botão de enviar direto (mais prático com chat_input)
             if rr_sel != "--":
                 txt_rr = rrd[rr_sel]
                 st.info(f"Enviar: {txt_rr}")
@@ -286,7 +285,6 @@ else:
                             conn.commit()
                         st.rerun()
             
-            # Campo de Chat Principal (ENTER FUNCIONA AQUI!)
             if prompt := st.chat_input("Digite sua mensagem..."):
                 c,r,co = enviar_mensagem_api(cli[1], prompt)
                 if c in [200,201]:
@@ -344,5 +342,5 @@ else:
             with st.form("cr"):
                 txt = st.text_area("Saudação Automática (Robô)", value=msg)
                 if st.form_submit_button("Salvar"): salvar_msg_boas_vindas(txt); st.success("Ok")
-            st.info("⚠️ O Robô só funciona se o 'main.py' estiver atualizado no Render com as variáveis META_TOKEN e META_PHONE_ID.")
+            st.info("⚠️ Se você ver erro aqui, dê um Reboot no App (Manage app > Reboot).")
         if st.button("Voltar"): st.session_state.pagina="chat"; st.rerun()
