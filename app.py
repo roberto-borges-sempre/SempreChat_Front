@@ -24,10 +24,6 @@ st.markdown("""
     }
     .chat-time { display: block; font-size: 11px; color: #999; margin-top: 4px; text-align: right; }
     .stChatInputContainer { padding-bottom: 20px !important; }
-    textarea[data-testid="stChatInputTextArea"] {
-        min-height: 50px !important; height: auto !important;
-        font-size: 16px !important; align-content: center !important;
-    }
     div[data-testid="stExpander"] { border: none; box-shadow: none; background-color: transparent; }
 </style>
 """, unsafe_allow_html=True)
@@ -40,11 +36,12 @@ try:
     else: st.error("⚠️ Configure DATABASE_URL nos Secrets."); st.stop()
 except Exception as e: st.error(f"Erro Conexão DB: {e}"); st.stop()
 
-# --- FUNÇÕES ---
+# --- FUNÇÕES DE DADOS ---
 
-@st.cache_data(ttl=60) 
+@st.cache_data(ttl=5) 
 def listar_todos_usuarios():
-    with engine.connect() as conn: return pd.read_sql(text("SELECT id, nome, email, funcao, ativo FROM usuarios ORDER BY id"), conn)
+    # Pega também o campo de bloqueio
+    with engine.connect() as conn: return pd.read_sql(text("SELECT id, nome, email, funcao, ativo, bloqueado_envio FROM usuarios ORDER BY id"), conn)
 
 @st.cache_data(ttl=60)
 def listar_usuarios_ativos():
@@ -68,6 +65,11 @@ def carregar_mensagens(cid):
 
 def carregar_info_cliente(cid):
     with engine.connect() as conn: return conn.execute(text("SELECT nome, whatsapp_id, codigo_cliente, cpf_cnpj, notas_internas FROM contatos WHERE id=:id"), {"id":cid}).fetchone()
+
+def verificar_bloqueio_usuario(uid):
+    with engine.connect() as conn: 
+        res = conn.execute(text("SELECT bloqueado_envio FROM usuarios WHERE id=:id"), {"id":uid}).fetchone()
+        return res[0] if res else False
 
 def gerar_relatorio_custos(dias=30):
     try:
@@ -93,14 +95,14 @@ def gerar_relatorio_custos(dias=30):
 def criar_usuario(n, e, s, f):
     try:
         with engine.connect() as conn:
-            conn.execute(text("INSERT INTO usuarios (nome, email, senha, funcao, ativo) VALUES (:n, :e, :s, :f, TRUE)"), {"n":n, "e":e, "s":s, "f":f})
+            conn.execute(text("INSERT INTO usuarios (nome, email, senha, funcao, ativo, bloqueado_envio) VALUES (:n, :e, :s, :f, TRUE, FALSE)"), {"n":n, "e":e, "s":s, "f":f})
             conn.commit()
         listar_todos_usuarios.clear(); return True, "Criado!"
     except Exception as er: return False, str(er)
 
-def editar_usuario(uid, nn, ns=None):
+def editar_usuario(uid, nn, ns=None, bloqueado=False):
     with engine.connect() as conn:
-        conn.execute(text("UPDATE usuarios SET nome = :n WHERE id = :id"), {"n":nn, "id":uid})
+        conn.execute(text("UPDATE usuarios SET nome = :n, bloqueado_envio = :b WHERE id = :id"), {"n":nn, "b":bloqueado, "id":uid})
         if ns: conn.execute(text("UPDATE usuarios SET senha = :s WHERE id = :id"), {"s":ns, "id":uid})
         conn.commit()
     listar_todos_usuarios.clear(); listar_usuarios_ativos.clear()
@@ -145,7 +147,7 @@ def salvar_msg_boas_vindas(txt):
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
 
-# --- TEMPLATES (COM CUSTO) ---
+# --- TEMPLATES ---
 def criar_template(nome_tecnico, custo):
     try:
         with engine.connect() as conn:
@@ -184,15 +186,28 @@ def get_media_bytes(media_id):
         if 'url' in r: return requests.get(r['url'], headers=headers).content
     except: return None
 
-def enviar_mensagem_api(telefone, conteudo, tipo="text", template_name=None):
+def enviar_mensagem_api(telefone, conteudo, tipo="text", template_name=None, variaveis=None):
     tel = ''.join(filter(str.isdigit, str(telefone)))
     if len(tel) == 13 and tel.startswith("55"): tel = tel[:4] + tel[5:]
+    
     url = f"https://graph.facebook.com/v18.0/{st.secrets['META_PHONE_ID']}/messages"
     headers = {"Authorization": f"Bearer {st.secrets['META_TOKEN']}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": tel, "type": tipo}
     
     if tipo == 'text': payload['text'] = {"body": conteudo}
-    elif tipo == 'template': payload['template'] = {"name": template_name, "language": {"code": "pt_BR"}}
+    elif tipo == 'template': 
+        # MONTAGEM DE VARIÁVEIS MANUAIS
+        components = []
+        if variaveis and len(variaveis) > 0:
+            # Filtra apenas variáveis preenchidas para evitar erro, ou envia string vazia se necessário
+            params = [{"type": "text", "text": str(v)} for v in variaveis]
+            components.append({"type": "body", "parameters": params})
+            
+        payload['template'] = {
+            "name": template_name, 
+            "language": {"code": "pt_BR"},
+            "components": components
+        }
     elif tipo == 'image': payload['image'] = {"id": conteudo}
     elif tipo == 'document': payload['document'] = {"id": conteudo, "filename": "Anexo"}
     elif tipo == 'audio': payload['audio'] = {"id": conteudo}
@@ -345,26 +360,45 @@ else:
                     st.rerun()
 
             with st.expander("📢 Enviar Template"):
-                df_tpl = listar_templates()
-                if not df_tpl.empty:
-                    # Cria lista de templates (nome) e um dicionário de custos
-                    tpl_list = df_tpl['nome_tecnico'].tolist()
-                    tpl_costs = {row['nome_tecnico']: row['custo_estimado'] for _, row in df_tpl.iterrows()}
+                # 1. VERIFICAR SE USUÁRIO ESTÁ BLOQUEADO
+                bloqueado = verificar_bloqueio_usuario(st.session_state.usuario['id'])
+                
+                if bloqueado and st.session_state.usuario['funcao'] != 'admin':
+                    st.error("🚫 O envio de templates está bloqueado para seu usuário. Contate o administrador.")
+                else:
+                    if bloqueado: st.warning("⚠️ Você está bloqueado, mas como é Admin, pode enviar.")
                     
-                    tpl_sel = st.selectbox("Selecione", ["--"] + tpl_list)
-                    if tpl_sel != "--":
-                        custo_tpl = tpl_costs.get(tpl_sel, 0.0)
-                        st.info(f"Custo Estimado: R$ {custo_tpl:.2f}")
+                    df_tpl = listar_templates()
+                    if not df_tpl.empty:
+                        tpl_list = df_tpl['nome_tecnico'].tolist()
+                        tpl_costs = {row['nome_tecnico']: row['custo_estimado'] for _, row in df_tpl.iterrows()}
                         
-                        if st.button(f"Enviar '{tpl_sel}'"):
-                            c,r = enviar_mensagem_api(cli[1], "", "template", tpl_sel)
-                            if c in [200,201]:
-                                with engine.connect() as conn:
-                                    conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":f"[TPL: {tpl_sel}]", "c":custo_tpl})
-                                    conn.commit()
-                                st.success("Enviado"); st.rerun()
-                            else: st.error(f"Erro: {r}")
-                else: st.warning("Sem templates.")
+                        tpl_sel = st.selectbox("Selecione", ["--"] + tpl_list)
+                        if tpl_sel != "--":
+                            custo_tpl = tpl_costs.get(tpl_sel, 0.0)
+                            st.caption(f"Custo Estimado: R$ {custo_tpl:.2f}")
+                            
+                            st.write("**Preencha as variáveis:**")
+                            col_v1, col_v2 = st.columns(2)
+                            var1 = col_v1.text_input("Variável {{1}}")
+                            var2 = col_v2.text_input("Variável {{2}}")
+                            
+                            if st.button(f"Enviar '{tpl_sel}'"):
+                                # Monta a lista de variaveis baseada no preenchimento
+                                vars_to_send = []
+                                if var1: vars_to_send.append(var1)
+                                if var2: vars_to_send.append(var2)
+
+                                c,r = enviar_mensagem_api(cli[1], "", "template", tpl_sel, variaveis=vars_to_send)
+                                if c in [200,201]:
+                                    with engine.connect() as conn:
+                                        msg_txt = f"[TPL: {tpl_sel}]"
+                                        if vars_to_send: msg_txt += f" Vars: {vars_to_send}"
+                                        conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":msg_txt, "c":custo_tpl})
+                                        conn.commit()
+                                    st.success("Enviado"); st.rerun()
+                                else: st.error(f"Erro: {r}")
+                    else: st.warning("Sem templates.")
         else: st.info("👈 Selecione um cliente.")
 
     elif st.session_state.pagina == "respostas":
@@ -381,7 +415,7 @@ else:
 
     elif st.session_state.pagina == "admin":
         st.header("⚙️ Admin")
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô", "📢 Templates", "💰 Custos"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ Usuários", "📝 Editar/Bloquear", "🤖 Config Robô", "📢 Templates", "💰 Custos"])
         
         with tab1:
             with st.form("nu"):
@@ -391,13 +425,32 @@ else:
                     if b: st.success(m)
                     else: st.error(m)
         with tab2:
-            dfu = listar_todos_usuarios(); st.dataframe(dfu)
+            st.subheader("Gerenciar Usuários")
+            dfu = listar_todos_usuarios()
+            # Mostra tabela simples
+            st.dataframe(dfu[['id','nome','email','funcao','bloqueado_envio']], use_container_width=True)
+            
             u_ids = dfu['id'].tolist()
-            sel_uid = st.selectbox("Selecione", u_ids, format_func=lambda x: dfu[dfu['id']==x]['nome'].values[0])
+            sel_uid = st.selectbox("Selecione Usuário para Editar", u_ids, format_func=lambda x: dfu[dfu['id']==x]['nome'].values[0])
+            
+            # Pega dados atuais
+            user_info = dfu[dfu['id']==sel_uid].iloc[0]
+            
             with st.form("edit_user"):
-                nn = st.text_input("Novo Nome"); ns = st.text_input("Nova Senha", type="password")
-                if st.form_submit_button("Salvar"): editar_usuario(sel_uid, nn, ns if ns else None); st.success("Salvo!"); time.sleep(1); st.rerun()
-            if st.button("Excluir", type="primary"): excluir_usuario(sel_uid); st.rerun()
+                nn = st.text_input("Nome", value=user_info['nome'])
+                ns = st.text_input("Nova Senha (deixe em branco para manter)", type="password")
+                
+                # Checkbox de Bloqueio
+                is_blocked = bool(user_info['bloqueado_envio'])
+                block_check = st.checkbox("🚫 Bloquear Envio de Templates", value=is_blocked)
+                
+                if st.form_submit_button("Salvar Alterações"): 
+                    editar_usuario(sel_uid, nn, ns if ns else None, bloqueado=block_check)
+                    st.success("Salvo!"); time.sleep(1); st.rerun()
+            
+            st.divider()
+            if st.button("Excluir Usuário", type="primary"): excluir_usuario(sel_uid); st.rerun()
+
         with tab3:
             msg = pegar_msg_boas_vindas()
             with st.form("cr"):
@@ -419,9 +472,7 @@ else:
             st.divider()
             dft = listar_templates()
             if not dft.empty:
-                # Mostra tabela bonitinha com custo
                 st.dataframe(dft.style.format({"custo_estimado": "R$ {:.2f}"}), use_container_width=True)
-                # Opção de exclusão
                 for _, row in dft.iterrows():
                     if st.button(f"🗑️ Excluir {row['nome_tecnico']}", key=f"dt_{row['id']}"): 
                         excluir_template(row['id']); st.rerun()
