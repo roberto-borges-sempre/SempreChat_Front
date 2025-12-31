@@ -3,8 +3,9 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import requests
 import time
+from datetime import datetime, timedelta
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
+# --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="SempreChat CRM", page_icon="💬", layout="wide")
 
 # --- ESTILO VISUAL ---
@@ -36,13 +37,11 @@ try:
     if "DATABASE_URL" in st.secrets:
         db_url = st.secrets["DATABASE_URL"].replace("postgres://", "postgresql://")
         engine = create_engine(db_url)
-    else:
-        st.error("⚠️ Configure DATABASE_URL nos Secrets."); st.stop()
-except Exception as e:
-    st.error(f"Erro Conexão DB: {e}"); st.stop()
+    else: st.error("⚠️ Configure DATABASE_URL nos Secrets."); st.stop()
+except Exception as e: st.error(f"Erro Conexão DB: {e}"); st.stop()
 
 # =======================
-# 🛠️ FUNÇÕES DE BANCO
+# 🛠️ FUNÇÕES DE LEITURA
 # =======================
 
 @st.cache_data(ttl=60) 
@@ -71,6 +70,29 @@ def carregar_mensagens(cid):
 
 def carregar_info_cliente(cid):
     with engine.connect() as conn: return conn.execute(text("SELECT nome, whatsapp_id, codigo_cliente, cpf_cnpj, notas_internas FROM contatos WHERE id=:id"), {"id":cid}).fetchone()
+
+# --- FUNÇÃO FINANCEIRA (NOVA) ---
+def gerar_relatorio_custos(dias=30):
+    try:
+        with engine.connect() as conn:
+            # Pega mensagens enviadas pela empresa nos últimos X dias
+            # Junta com contatos e usuários para saber quem é a vendedora responsável
+            query = text("""
+                SELECT 
+                    u.nome AS Vendedora,
+                    COUNT(m.id) AS Qtd_Mensagens,
+                    SUM(m.custo) AS Custo_Total
+                FROM mensagens m
+                JOIN contatos c ON m.contato_id = c.id
+                LEFT JOIN usuarios u ON c.vendedora_id = u.id
+                WHERE m.remetente = 'empresa' 
+                  AND m.data_envio >= CURRENT_DATE - INTERVAL :d DAY
+                GROUP BY u.nome
+                ORDER BY Custo_Total DESC
+            """)
+            return pd.read_sql(query, conn, params={"d": f"{dias} days"})
+    except:
+        return pd.DataFrame()
 
 # --- AÇÕES CRUD ---
 def criar_usuario(n, e, s, f):
@@ -128,33 +150,19 @@ def salvar_msg_boas_vindas(txt):
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
 
-# --- FUNÇÕES TEMPLATES (COM AUTO-REPARO) ---
-def forcar_criacao_tabela_templates():
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS templates (
-                    id SERIAL PRIMARY KEY,
-                    nome_tecnico TEXT UNIQUE NOT NULL,
-                    idioma TEXT DEFAULT 'pt_BR'
-                );
-            """))
-            conn.commit()
-        return True, "Tabela recriada com sucesso!"
-    except Exception as e: return False, str(e)
-
+# --- TEMPLATES ---
 def criar_template(nome_tecnico):
     try:
         with engine.connect() as conn:
             conn.execute(text("INSERT INTO templates (nome_tecnico, idioma) VALUES (:n, 'pt_BR')"), {"n":nome_tecnico})
             conn.commit()
-        return True, "Template Cadastrado!"
+        return True, "Cadastrado!"
     except Exception as e: return False, str(e)
 
 def listar_templates():
     try:
         with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM templates ORDER BY nome_tecnico"), conn)
-    except: return pd.DataFrame() # Retorna vazio se der erro
+    except: return pd.DataFrame()
 
 def excluir_template(tid):
     with engine.connect() as conn:
@@ -192,7 +200,7 @@ def enviar_mensagem_api(telefone, conteudo, tipo="text", template_name=None):
     if tipo == 'text': payload['text'] = {"body": conteudo}
     elif tipo == 'template':
         payload['template'] = {"name": template_name, "language": {"code": "pt_BR"}}
-        cost = 0.05
+        cost = 0.05 # CUSTO ESTIMADO DO TEMPLATE (EM DOLARES OU REAIS, CONFORME SUA LOGICA)
     elif tipo == 'image': payload['image'] = {"id": conteudo}
     elif tipo == 'document': payload['document'] = {"id": conteudo, "filename": "Anexo"}
     elif tipo == 'audio': payload['audio'] = {"id": conteudo}
@@ -271,7 +279,6 @@ else:
             cli = carregar_info_cliente(st.session_state.chat_ativo)
             if not cli: st.warning("Cliente sumiu"); st.stop()
             
-            # HEADER
             c1, c2, c3 = st.columns([3, 1, 1])
             with c1: st.title(cli[0]); st.code(cli[1], language="text")
             with c2: 
@@ -293,7 +300,6 @@ else:
 
             st.divider()
 
-            # MSGS
             msgs = carregar_mensagens(st.session_state.chat_ativo)
             with st.container(height=400):
                 if msgs.empty: st.info("Início da conversa.")
@@ -312,7 +318,6 @@ else:
                                 elif r['tipo']=='audio': st.audio(dt)
                                 elif r['tipo']=='document': st.download_button("📄 Baixar", dt, file_name="anexo.pdf", key=f"f_{r['id']}")
 
-            # ANEXO
             with st.expander("📎 Anexar"):
                 uploaded_file = st.file_uploader("Arquivo", type=['png', 'jpg', 'pdf', 'mp3', 'ogg', 'wav'])
                 if uploaded_file and st.button("Enviar Arq"):
@@ -331,7 +336,6 @@ else:
                                 st.rerun()
                             else: st.error(f"Erro Meta: {r}")
 
-            # INPUT
             rr = listar_rr(); rrd = {r[1]:r[2] for _,r in rr.iterrows()}
             rr_sel = st.selectbox("⚡ Rápida", ["--"]+list(rrd.keys()))
             if rr_sel != "--":
@@ -352,12 +356,11 @@ else:
                         conn.commit()
                     st.rerun()
 
-            # ÁREA DE TEMPLATES
-            with st.expander("📢 Enviar Template (Furar 24h)"):
+            with st.expander("📢 Enviar Template"):
                 df_tpl = listar_templates()
                 if not df_tpl.empty:
                     tpl_list = df_tpl['nome_tecnico'].tolist()
-                    tpl_sel = st.selectbox("Selecione o Template", ["--"] + tpl_list)
+                    tpl_sel = st.selectbox("Selecione", ["--"] + tpl_list)
                     if tpl_sel != "--":
                         if st.button(f"Enviar '{tpl_sel}'"):
                             c,r,co = enviar_mensagem_api(cli[1], "", "template", tpl_sel)
@@ -367,7 +370,7 @@ else:
                                     conn.commit()
                                 st.success("Enviado"); st.rerun()
                             else: st.error(f"Erro: {r}")
-                else: st.warning("Nenhum template cadastrado.")
+                else: st.warning("Sem templates.")
 
         else: st.info("👈 Selecione um cliente.")
 
@@ -387,7 +390,8 @@ else:
     # --- ADMIN ---
     elif st.session_state.pagina == "admin":
         st.header("⚙️ Admin")
-        tab1, tab2, tab3, tab4 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô", "📢 Templates Meta"])
+        # ADICIONADA A NOVA ABA "💰 Custos"
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ Usuários", "📝 Editar/Listar", "🤖 Config Robô", "📢 Templates", "💰 Custos"])
         
         with tab1:
             with st.form("nu"):
@@ -407,35 +411,54 @@ else:
         with tab3:
             msg = pegar_msg_boas_vindas()
             with st.form("cr"):
-                txt = st.text_area("Saudação Automática (Robô)", value=msg)
+                txt = st.text_area("Saudação Automática", value=msg)
                 if st.form_submit_button("Salvar"): 
                     sucesso, retorno = salvar_msg_boas_vindas(txt)
                     if sucesso: st.success("Ok")
                     else: st.error(f"Erro: {retorno}")
-        
         with tab4:
-            st.info("Cadastre aqui os nomes TÉCNICOS dos templates aprovados na Meta.")
-            # BOTÃO DE REPARO DE EMERGÊNCIA
-            if st.button("⚠️ Tabela não existe? Clique para reparar!"):
-                ok, msg_db = forcar_criacao_tabela_templates()
-                if ok: st.success(msg_db)
-                else: st.error(msg_db)
-
+            st.info("Cadastre o nome TÉCNICO do template aprovado na Meta.")
             with st.form("ntpl"):
-                nt = st.text_input("Nome Técnico (ex: hello_world)")
-                if st.form_submit_button("Cadastrar Template"):
+                nt = st.text_input("Nome Técnico (ex: contato_inicial)")
+                if st.form_submit_button("Cadastrar"):
                     b, m = criar_template(nt)
                     if b: st.success(m); st.rerun()
                     else: st.error(m)
-            
             st.divider()
             dft = listar_templates()
             if not dft.empty:
                 for _, row in dft.iterrows():
                     c1, c2 = st.columns([4, 1])
                     c1.code(row['nome_tecnico'])
-                    if c2.button("🗑️", key=f"dt_{row['id']}"):
-                        excluir_template(row['id'])
-                        st.rerun()
+                    if c2.button("🗑️", key=f"dt_{row['id']}"): excluir_template(row['id']); st.rerun()
+        
+        # --- NOVA ABA FINANCEIRA ---
+        with tab5:
+            st.subheader("💰 Relatório de Custos (Templates)")
+            dias = st.slider("Filtrar últimos dias:", 1, 90, 30)
+            
+            df_fin = gerar_relatorio_custos(dias)
+            
+            if not df_fin.empty:
+                # Métricas Gerais
+                total_gasto = df_fin['custo_total'].sum()
+                total_msgs = df_fin['qtd_mensagens'].sum()
+                
+                m1, m2 = st.columns(2)
+                m1.metric("Custo Total (R$)", f"R$ {total_gasto:.2f}")
+                m2.metric("Total Mensagens", total_msgs)
+                
+                st.divider()
+                st.write("### Detalhes por Vendedora")
+                
+                # Formata a tabela para ficar bonita
+                st.dataframe(
+                    df_fin.style.format({"custo_total": "R$ {:.2f}"}),
+                    use_container_width=True
+                )
+                
+                st.bar_chart(df_fin, x="vendedora", y="custo_total")
+            else:
+                st.info("Nenhum custo registrado neste período.")
 
         if st.button("Voltar"): st.session_state.pagina="chat"; st.rerun()
