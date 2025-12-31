@@ -100,12 +100,24 @@ def criar_usuario(n, e, s, f):
         listar_todos_usuarios.clear(); return True, "Criado!"
     except Exception as er: return False, str(er)
 
-def editar_usuario(uid, nn, ns=None, bloqueado=False):
+def editar_usuario(uid, nn, ne, nf, ns=None, bloqueado=False):
+    # ATUALIZAÇÃO COMPLETA: Nome, Email, Função, Senha, Bloqueio
     with engine.connect() as conn:
-        conn.execute(text("UPDATE usuarios SET nome = :n, bloqueado_envio = :b WHERE id = :id"), {"n":nn, "b":bloqueado, "id":uid})
-        if ns: conn.execute(text("UPDATE usuarios SET senha = :s WHERE id = :id"), {"s":ns, "id":uid})
-        conn.commit()
-    listar_todos_usuarios.clear(); listar_usuarios_ativos.clear()
+        try:
+            conn.execute(text("""
+                UPDATE usuarios 
+                SET nome = :n, email = :e, funcao = :f, bloqueado_envio = :b 
+                WHERE id = :id
+            """), {"n":nn, "e":ne, "f":nf, "b":bloqueado, "id":uid})
+            
+            if ns: 
+                conn.execute(text("UPDATE usuarios SET senha = :s WHERE id = :id"), {"s":ns, "id":uid})
+            
+            conn.commit()
+            listar_todos_usuarios.clear(); listar_usuarios_ativos.clear()
+            return True, "Salvo com sucesso!"
+        except Exception as e:
+            return False, f"Erro ao salvar (Email duplicado?): {str(e)}"
 
 def excluir_usuario(uid):
     with engine.connect() as conn:
@@ -147,26 +159,21 @@ def salvar_msg_boas_vindas(txt):
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
 
-# --- FUNÇÃO IMPORTANTE: GARANTIR CONTATO PARA DISPARO ---
 def garantir_contato(whatsapp_id, vendedora_id):
-    # Formata numero
     tel = ''.join(filter(str.isdigit, str(whatsapp_id)))
-    if len(tel) < 10: return None # Numero invalido
+    if len(tel) < 10: return None
     if len(tel) == 11 and not tel.startswith("55"): tel = "55" + tel
-    if len(tel) == 13 and tel.startswith("55"): pass # Ok
-    else: pass # Tenta assim mesmo ou ajusta conforme necessidade
+    if len(tel) == 13 and tel.startswith("55"): pass
+    else: pass 
 
     with engine.connect() as conn:
-        # Tenta achar
         res = conn.execute(text("SELECT id FROM contatos WHERE whatsapp_id = :w"), {"w":tel}).fetchone()
         if res:
             cid = res[0]
-            # Atualiza vendedora se estiver sem dono
             conn.execute(text("UPDATE contatos SET vendedora_id=:v WHERE id=:id AND vendedora_id IS NULL"), {"v":vendedora_id, "id":cid})
             conn.commit()
             return cid
         else:
-            # Cria novo
             try:
                 r = conn.execute(text("""
                     INSERT INTO contatos (whatsapp_id, nome, status_atendimento, vendedora_id) 
@@ -284,12 +291,20 @@ else:
     with st.sidebar:
         st.write(f"👤 **{st.session_state.usuario['nome']}**")
         st.caption(st.session_state.usuario['funcao'])
+        
         if st.button("💬 Chat", use_container_width=True): st.session_state.pagina = "chat"; st.rerun()
-        if st.button("📢 Disparos", use_container_width=True): st.session_state.pagina = "disparos"; st.rerun()
+        
+        # --- BLOQUEIO: SÓ ADMIN VÊ O BOTÃO ---
+        if st.session_state.usuario['funcao'] == 'admin':
+            if st.button("📢 Disparos", use_container_width=True): st.session_state.pagina = "disparos"; st.rerun()
+        
         if st.button("⚡ Respostas", use_container_width=True): st.session_state.pagina = "respostas"; st.rerun()
-        if st.session_state.usuario['funcao']=='admin':
+        
+        if st.session_state.usuario['funcao'] == 'admin':
             if st.button("⚙️ Admin", use_container_width=True): st.session_state.pagina = "admin"; st.rerun()
+        
         if st.button("Sair", type="primary"): st.session_state.usuario = None; st.rerun()
+        
         st.divider()
         if st.session_state.pagina == "chat":
             st.subheader("📥 Fila")
@@ -308,107 +323,86 @@ else:
     # --- PÁGINAS ---
     
     if st.session_state.pagina == "disparos":
-        st.title("📢 Disparos em Massa")
-        
-        # Bloqueio de funcionalidade se o admin quiser restringir, pode colocar logica aqui.
-        # Por enquanto aberto a todos que tem acesso.
-        
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.subheader("1. Lista de Contatos")
-            st.caption("Cole os números abaixo (um por linha ou separados por vírgula). O sistema limpará a formatação.")
-            raw_numbers = st.text_area("Números de Telefone", height=200)
+        # --- SEGURANÇA EXTRA: Se não for admin e tentar entrar, bloqueia ---
+        if st.session_state.usuario['funcao'] != 'admin':
+            st.error("⛔ Acesso Negado. Apenas administradores podem fazer disparos em massa.")
+        else:
+            st.title("📢 Disparos em Massa (Admin)")
             
-        with c2:
-            st.subheader("2. Configuração")
-            
-            # Seleção de Vendedora (Dona do Lead)
-            us = listar_usuarios_ativos()
-            ud = {u[1]:u[0] for _,u in us.iterrows()}
-            
-            # Se não for admin, trava na própria vendedora
-            idx_v = 0
-            if st.session_state.usuario['funcao'] != 'admin':
-                # Filtra apenas o próprio usuario no dict se quiser travar, 
-                # ou deixa selecionar mas padroniza. Aqui deixarei selecionar para criar leads para outros.
-                pass
-            
-            vend_sel = st.selectbox("Atribuir à Vendedora:", list(ud.keys()))
-            id_vend_sel = ud[vend_sel]
-            
-            # Seleção de Template
-            df_tpl = listar_templates()
-            if not df_tpl.empty:
-                tpl_list = df_tpl['nome_tecnico'].tolist()
-                tpl_sel = st.selectbox("Template:", tpl_list)
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                st.subheader("1. Lista de Contatos")
+                st.caption("Cole os números abaixo (um por linha ou separados por vírgula).")
+                raw_numbers = st.text_area("Números de Telefone", height=200)
                 
-                # Variaveis para o Lote
-                st.markdown("**Variáveis do Lote:**")
-                st.caption("O valor preenchido aqui será igual para TODOS os números.")
-                dv1 = st.text_input("Var {{1}}")
-                dv2 = st.text_input("Var {{2}}")
+            with c2:
+                st.subheader("2. Configuração")
                 
-                custo_estimado = df_tpl[df_tpl['nome_tecnico']==tpl_sel]['custo_estimado'].values[0]
-            else:
-                st.error("Nenhum template cadastrado.")
-                tpl_sel = None
+                us = listar_usuarios_ativos()
+                ud = {u[1]:u[0] for _,u in us.iterrows()}
+                
+                vend_sel = st.selectbox("Atribuir à Vendedora:", list(ud.keys()))
+                id_vend_sel = ud[vend_sel]
+                
+                df_tpl = listar_templates()
+                if not df_tpl.empty:
+                    tpl_list = df_tpl['nome_tecnico'].tolist()
+                    tpl_sel = st.selectbox("Template:", tpl_list)
+                    
+                    st.markdown("**Variáveis do Lote:**")
+                    dv1 = st.text_input("Var {{1}}")
+                    dv2 = st.text_input("Var {{2}}")
+                    
+                    custo_estimado = df_tpl[df_tpl['nome_tecnico']==tpl_sel]['custo_estimado'].values[0]
+                else:
+                    st.error("Nenhum template cadastrado.")
+                    tpl_sel = None
 
-        st.divider()
-        
-        if st.button("🚀 Iniciar Disparo", type="primary", disabled=(tpl_sel is None or not raw_numbers)):
-            # Processar números
-            # Divide por linha e virgula
-            lista_suja = re.split(r'[,\n\r]+', raw_numbers)
-            numeros_limpos = []
-            for n in lista_suja:
-                limpo = ''.join(filter(str.isdigit, n))
-                if len(limpo) >= 10: # Minimo DDD + numero
-                    if len(limpo) == 10 or len(limpo) == 11: limpo = "55" + limpo
-                    numeros_limpos.append(limpo)
+            st.divider()
             
-            # Remove duplicados da lista
-            numeros_limpos = list(set(numeros_limpos))
-            
-            total = len(numeros_limpos)
-            if total == 0:
-                st.warning("Nenhum número válido encontrado.")
-            else:
-                st.info(f"Iniciando envio para {total} contatos...")
-                bar = st.progress(0)
-                sucesso = 0
-                erro = 0
+            if st.button("🚀 Iniciar Disparo", type="primary", disabled=(tpl_sel is None or not raw_numbers)):
+                lista_suja = re.split(r'[,\n\r]+', raw_numbers)
+                numeros_limpos = []
+                for n in lista_suja:
+                    limpo = ''.join(filter(str.isdigit, n))
+                    if len(limpo) >= 10: 
+                        if len(limpo) == 10 or len(limpo) == 11: limpo = "55" + limpo
+                        numeros_limpos.append(limpo)
                 
-                vars_to_send = []
-                if dv1: vars_to_send.append(dv1)
-                if dv2: vars_to_send.append(dv2)
+                numeros_limpos = list(set(numeros_limpos))
+                total = len(numeros_limpos)
                 
-                for i, num in enumerate(numeros_limpos):
-                    # 1. Cria ou Pega Contato
-                    cid = garantir_contato(num, id_vend_sel)
+                if total == 0:
+                    st.warning("Nenhum número válido encontrado.")
+                else:
+                    st.info(f"Iniciando envio para {total} contatos...")
+                    bar = st.progress(0)
+                    sucesso = 0
+                    erro = 0
                     
-                    if cid:
-                        # 2. Envia
-                        code, resp = enviar_mensagem_api(num, "", "template", tpl_sel, variaveis=vars_to_send)
+                    vars_to_send = []
+                    if dv1: vars_to_send.append(dv1)
+                    if dv2: vars_to_send.append(dv2)
+                    
+                    for i, num in enumerate(numeros_limpos):
+                        cid = garantir_contato(num, id_vend_sel)
+                        if cid:
+                            code, resp = enviar_mensagem_api(num, "", "template", tpl_sel, variaveis=vars_to_send)
+                            if code in [200, 201]:
+                                sucesso += 1
+                                with engine.connect() as conn:
+                                    msg_log = f"[DISPARO: {tpl_sel}]"
+                                    if vars_to_send: msg_log += f" Vars: {vars_to_send}"
+                                    conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":cid, "t":msg_log, "c":custo_estimado})
+                                    conn.commit()
+                            else: erro += 1
+                        else: erro += 1
                         
-                        if code in [200, 201]:
-                            sucesso += 1
-                            # 3. Loga
-                            with engine.connect() as conn:
-                                msg_log = f"[DISPARO: {tpl_sel}]"
-                                if vars_to_send: msg_log += f" Vars: {vars_to_send}"
-                                conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":cid, "t":msg_log, "c":custo_estimado})
-                                conn.commit()
-                        else:
-                            erro += 1
-                    else:
-                        erro += 1
+                        bar.progress((i + 1) / total)
+                        time.sleep(0.2)
                     
-                    # Atualiza barra
-                    bar.progress((i + 1) / total)
-                    time.sleep(0.2) # Pequeno delay para evitar bloqueio agressivo
-                
-                st.success(f"Finalizado! ✅ Sucessos: {sucesso} | ❌ Erros: {erro}")
-                st.balloons()
+                    st.success(f"Finalizado! ✅ Sucessos: {sucesso} | ❌ Erros: {erro}")
+                    st.balloons()
 
     elif st.session_state.pagina == "chat":
         if "chat_ativo" in st.session_state:
@@ -549,7 +543,7 @@ else:
         
         with tab1:
             with st.form("nu"):
-                n = st.text_input("Nome"); e = st.text_input("Login"); s = st.text_input("Senha"); f = st.selectbox("Função", ["vendedor","admin"])
+                n = st.text_input("Nome"); e = st.text_input("Login (Email)"); s = st.text_input("Senha"); f = st.selectbox("Função", ["vendedor","admin"])
                 if st.form_submit_button("Cadastrar"): 
                     b,m = criar_usuario(n,e,s,f); 
                     if b: st.success(m)
@@ -564,14 +558,22 @@ else:
             user_info = dfu[dfu['id']==sel_uid].iloc[0]
             
             with st.form("edit_user"):
-                nn = st.text_input("Nome", value=user_info['nome'])
-                ns = st.text_input("Nova Senha (deixe em branco para manter)", type="password")
+                c_edit1, c_edit2 = st.columns(2)
+                with c_edit1:
+                    nn = st.text_input("Nome", value=user_info['nome'])
+                    ne = st.text_input("Email (Login)", value=user_info['email'])
+                with c_edit2:
+                    current_idx = 0 if user_info['funcao'] == 'vendedor' else 1
+                    nf = st.selectbox("Função", ["vendedor", "admin"], index=current_idx)
+                    ns = st.text_input("Nova Senha (deixe branco se não mudar)", type="password")
+                
                 is_blocked = bool(user_info['bloqueado_envio'])
-                block_check = st.checkbox("🚫 Bloquear Envio de Templates", value=is_blocked)
+                block_check = st.checkbox("🚫 Bloquear Envio de Templates (Trava o Vendedor)", value=is_blocked)
                 
                 if st.form_submit_button("Salvar Alterações"): 
-                    editar_usuario(sel_uid, nn, ns if ns else None, bloqueado=block_check)
-                    st.success("Salvo!"); time.sleep(1); st.rerun()
+                    res, msg = editar_usuario(sel_uid, nn, ne, nf, ns if ns else None, bloqueado=block_check)
+                    if res: st.success(msg); time.sleep(1); st.rerun()
+                    else: st.error(msg)
             
             st.divider()
             if st.button("Excluir Usuário", type="primary"): excluir_usuario(sel_uid); st.rerun()
