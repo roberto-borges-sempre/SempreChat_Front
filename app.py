@@ -3,6 +3,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import requests
 import time
+import re
 from datetime import datetime, timedelta
 
 # --- CONFIGURAÇÃO ---
@@ -40,7 +41,6 @@ except Exception as e: st.error(f"Erro Conexão DB: {e}"); st.stop()
 
 @st.cache_data(ttl=5) 
 def listar_todos_usuarios():
-    # Pega também o campo de bloqueio
     with engine.connect() as conn: return pd.read_sql(text("SELECT id, nome, email, funcao, ativo, bloqueado_envio FROM usuarios ORDER BY id"), conn)
 
 @st.cache_data(ttl=60)
@@ -147,6 +147,36 @@ def salvar_msg_boas_vindas(txt):
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
 
+# --- FUNÇÃO IMPORTANTE: GARANTIR CONTATO PARA DISPARO ---
+def garantir_contato(whatsapp_id, vendedora_id):
+    # Formata numero
+    tel = ''.join(filter(str.isdigit, str(whatsapp_id)))
+    if len(tel) < 10: return None # Numero invalido
+    if len(tel) == 11 and not tel.startswith("55"): tel = "55" + tel
+    if len(tel) == 13 and tel.startswith("55"): pass # Ok
+    else: pass # Tenta assim mesmo ou ajusta conforme necessidade
+
+    with engine.connect() as conn:
+        # Tenta achar
+        res = conn.execute(text("SELECT id FROM contatos WHERE whatsapp_id = :w"), {"w":tel}).fetchone()
+        if res:
+            cid = res[0]
+            # Atualiza vendedora se estiver sem dono
+            conn.execute(text("UPDATE contatos SET vendedora_id=:v WHERE id=:id AND vendedora_id IS NULL"), {"v":vendedora_id, "id":cid})
+            conn.commit()
+            return cid
+        else:
+            # Cria novo
+            try:
+                r = conn.execute(text("""
+                    INSERT INTO contatos (whatsapp_id, nome, status_atendimento, vendedora_id) 
+                    VALUES (:w, 'Lead Importado', 'fila', :v) 
+                    RETURNING id
+                """), {"w":tel, "v":vendedora_id}).fetchone()
+                conn.commit()
+                return r[0]
+            except: return None
+
 # --- TEMPLATES ---
 def criar_template(nome_tecnico, custo):
     try:
@@ -196,10 +226,8 @@ def enviar_mensagem_api(telefone, conteudo, tipo="text", template_name=None, var
     
     if tipo == 'text': payload['text'] = {"body": conteudo}
     elif tipo == 'template': 
-        # MONTAGEM DE VARIÁVEIS MANUAIS
         components = []
         if variaveis and len(variaveis) > 0:
-            # Filtra apenas variáveis preenchidas para evitar erro, ou envia string vazia se necessário
             params = [{"type": "text", "text": str(v)} for v in variaveis]
             components.append({"type": "body", "parameters": params})
             
@@ -257,6 +285,7 @@ else:
         st.write(f"👤 **{st.session_state.usuario['nome']}**")
         st.caption(st.session_state.usuario['funcao'])
         if st.button("💬 Chat", use_container_width=True): st.session_state.pagina = "chat"; st.rerun()
+        if st.button("📢 Disparos", use_container_width=True): st.session_state.pagina = "disparos"; st.rerun()
         if st.button("⚡ Respostas", use_container_width=True): st.session_state.pagina = "respostas"; st.rerun()
         if st.session_state.usuario['funcao']=='admin':
             if st.button("⚙️ Admin", use_container_width=True): st.session_state.pagina = "admin"; st.rerun()
@@ -276,8 +305,112 @@ else:
                         st.session_state.chat_ativo = r['id']; st.rerun()
             except Exception as e: st.error("Erro Fila")
 
-    # --- CHAT ---
-    if st.session_state.pagina == "chat":
+    # --- PÁGINAS ---
+    
+    if st.session_state.pagina == "disparos":
+        st.title("📢 Disparos em Massa")
+        
+        # Bloqueio de funcionalidade se o admin quiser restringir, pode colocar logica aqui.
+        # Por enquanto aberto a todos que tem acesso.
+        
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.subheader("1. Lista de Contatos")
+            st.caption("Cole os números abaixo (um por linha ou separados por vírgula). O sistema limpará a formatação.")
+            raw_numbers = st.text_area("Números de Telefone", height=200)
+            
+        with c2:
+            st.subheader("2. Configuração")
+            
+            # Seleção de Vendedora (Dona do Lead)
+            us = listar_usuarios_ativos()
+            ud = {u[1]:u[0] for _,u in us.iterrows()}
+            
+            # Se não for admin, trava na própria vendedora
+            idx_v = 0
+            if st.session_state.usuario['funcao'] != 'admin':
+                # Filtra apenas o próprio usuario no dict se quiser travar, 
+                # ou deixa selecionar mas padroniza. Aqui deixarei selecionar para criar leads para outros.
+                pass
+            
+            vend_sel = st.selectbox("Atribuir à Vendedora:", list(ud.keys()))
+            id_vend_sel = ud[vend_sel]
+            
+            # Seleção de Template
+            df_tpl = listar_templates()
+            if not df_tpl.empty:
+                tpl_list = df_tpl['nome_tecnico'].tolist()
+                tpl_sel = st.selectbox("Template:", tpl_list)
+                
+                # Variaveis para o Lote
+                st.markdown("**Variáveis do Lote:**")
+                st.caption("O valor preenchido aqui será igual para TODOS os números.")
+                dv1 = st.text_input("Var {{1}}")
+                dv2 = st.text_input("Var {{2}}")
+                
+                custo_estimado = df_tpl[df_tpl['nome_tecnico']==tpl_sel]['custo_estimado'].values[0]
+            else:
+                st.error("Nenhum template cadastrado.")
+                tpl_sel = None
+
+        st.divider()
+        
+        if st.button("🚀 Iniciar Disparo", type="primary", disabled=(tpl_sel is None or not raw_numbers)):
+            # Processar números
+            # Divide por linha e virgula
+            lista_suja = re.split(r'[,\n\r]+', raw_numbers)
+            numeros_limpos = []
+            for n in lista_suja:
+                limpo = ''.join(filter(str.isdigit, n))
+                if len(limpo) >= 10: # Minimo DDD + numero
+                    if len(limpo) == 10 or len(limpo) == 11: limpo = "55" + limpo
+                    numeros_limpos.append(limpo)
+            
+            # Remove duplicados da lista
+            numeros_limpos = list(set(numeros_limpos))
+            
+            total = len(numeros_limpos)
+            if total == 0:
+                st.warning("Nenhum número válido encontrado.")
+            else:
+                st.info(f"Iniciando envio para {total} contatos...")
+                bar = st.progress(0)
+                sucesso = 0
+                erro = 0
+                
+                vars_to_send = []
+                if dv1: vars_to_send.append(dv1)
+                if dv2: vars_to_send.append(dv2)
+                
+                for i, num in enumerate(numeros_limpos):
+                    # 1. Cria ou Pega Contato
+                    cid = garantir_contato(num, id_vend_sel)
+                    
+                    if cid:
+                        # 2. Envia
+                        code, resp = enviar_mensagem_api(num, "", "template", tpl_sel, variaveis=vars_to_send)
+                        
+                        if code in [200, 201]:
+                            sucesso += 1
+                            # 3. Loga
+                            with engine.connect() as conn:
+                                msg_log = f"[DISPARO: {tpl_sel}]"
+                                if vars_to_send: msg_log += f" Vars: {vars_to_send}"
+                                conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":cid, "t":msg_log, "c":custo_estimado})
+                                conn.commit()
+                        else:
+                            erro += 1
+                    else:
+                        erro += 1
+                    
+                    # Atualiza barra
+                    bar.progress((i + 1) / total)
+                    time.sleep(0.2) # Pequeno delay para evitar bloqueio agressivo
+                
+                st.success(f"Finalizado! ✅ Sucessos: {sucesso} | ❌ Erros: {erro}")
+                st.balloons()
+
+    elif st.session_state.pagina == "chat":
         if "chat_ativo" in st.session_state:
             cli = carregar_info_cliente(st.session_state.chat_ativo)
             if not cli: st.warning("Cliente sumiu"); st.stop()
@@ -360,9 +493,7 @@ else:
                     st.rerun()
 
             with st.expander("📢 Enviar Template"):
-                # 1. VERIFICAR SE USUÁRIO ESTÁ BLOQUEADO
                 bloqueado = verificar_bloqueio_usuario(st.session_state.usuario['id'])
-                
                 if bloqueado and st.session_state.usuario['funcao'] != 'admin':
                     st.error("🚫 O envio de templates está bloqueado para seu usuário. Contate o administrador.")
                 else:
@@ -384,7 +515,6 @@ else:
                             var2 = col_v2.text_input("Variável {{2}}")
                             
                             if st.button(f"Enviar '{tpl_sel}'"):
-                                # Monta a lista de variaveis baseada no preenchimento
                                 vars_to_send = []
                                 if var1: vars_to_send.append(var1)
                                 if var2: vars_to_send.append(var2)
@@ -427,20 +557,15 @@ else:
         with tab2:
             st.subheader("Gerenciar Usuários")
             dfu = listar_todos_usuarios()
-            # Mostra tabela simples
             st.dataframe(dfu[['id','nome','email','funcao','bloqueado_envio']], use_container_width=True)
             
             u_ids = dfu['id'].tolist()
             sel_uid = st.selectbox("Selecione Usuário para Editar", u_ids, format_func=lambda x: dfu[dfu['id']==x]['nome'].values[0])
-            
-            # Pega dados atuais
             user_info = dfu[dfu['id']==sel_uid].iloc[0]
             
             with st.form("edit_user"):
                 nn = st.text_input("Nome", value=user_info['nome'])
                 ns = st.text_input("Nova Senha (deixe em branco para manter)", type="password")
-                
-                # Checkbox de Bloqueio
                 is_blocked = bool(user_info['bloqueado_envio'])
                 block_check = st.checkbox("🚫 Bloquear Envio de Templates", value=is_blocked)
                 
