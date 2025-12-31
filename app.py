@@ -101,7 +101,6 @@ def criar_usuario(n, e, s, f):
     except Exception as er: return False, str(er)
 
 def editar_usuario(uid, nn, ne, nf, ns=None, bloqueado=False):
-    # ATUALIZAÇÃO COMPLETA: Nome, Email, Função, Senha, Bloqueio
     with engine.connect() as conn:
         try:
             conn.execute(text("""
@@ -109,15 +108,11 @@ def editar_usuario(uid, nn, ne, nf, ns=None, bloqueado=False):
                 SET nome = :n, email = :e, funcao = :f, bloqueado_envio = :b 
                 WHERE id = :id
             """), {"n":nn, "e":ne, "f":nf, "b":bloqueado, "id":uid})
-            
-            if ns: 
-                conn.execute(text("UPDATE usuarios SET senha = :s WHERE id = :id"), {"s":ns, "id":uid})
-            
+            if ns: conn.execute(text("UPDATE usuarios SET senha = :s WHERE id = :id"), {"s":ns, "id":uid})
             conn.commit()
             listar_todos_usuarios.clear(); listar_usuarios_ativos.clear()
             return True, "Salvo com sucesso!"
-        except Exception as e:
-            return False, f"Erro ao salvar (Email duplicado?): {str(e)}"
+        except Exception as e: return False, f"Erro: {str(e)}"
 
 def excluir_usuario(uid):
     with engine.connect() as conn:
@@ -140,7 +135,7 @@ def transferir_atendimento(cid, vid):
 
 def encerrar_atendimento(cid):
     with engine.connect() as conn:
-        conn.execute(text("UPDATE contatos SET status_atendimento='encerrado' WHERE id=:cid"), {"cid":cid})
+        conn.execute(text("UPDATE contatos SET status_atendimento='encerrado', contexto_bot=NULL WHERE id=:cid"), {"cid":cid})
         conn.commit()
     carregar_fila.clear()
 
@@ -158,6 +153,23 @@ def salvar_msg_boas_vindas(txt):
             conn.commit()
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
+
+# --- REGRAS BOT ---
+def criar_regra_bot(gatilho, resposta):
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("INSERT INTO bot_regras (template_gatilho, resposta_texto) VALUES (:g, :r) ON CONFLICT (template_gatilho) DO UPDATE SET resposta_texto = :r"), {"g":gatilho, "r":resposta})
+            conn.commit()
+        return True, "Regra Salva!"
+    except Exception as e: return False, str(e)
+
+def listar_regras_bot():
+    with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM bot_regras"), conn)
+
+def excluir_regra_bot(rid):
+    with engine.connect() as conn:
+        conn.execute(text("DELETE FROM bot_regras WHERE id=:id"), {"id":rid})
+        conn.commit()
 
 def garantir_contato(whatsapp_id, vendedora_id):
     tel = ''.join(filter(str.isdigit, str(whatsapp_id)))
@@ -294,7 +306,6 @@ else:
         
         if st.button("💬 Chat", use_container_width=True): st.session_state.pagina = "chat"; st.rerun()
         
-        # --- BLOQUEIO: SÓ ADMIN VÊ O BOTÃO ---
         if st.session_state.usuario['funcao'] == 'admin':
             if st.button("📢 Disparos", use_container_width=True): st.session_state.pagina = "disparos"; st.rerun()
         
@@ -323,24 +334,19 @@ else:
     # --- PÁGINAS ---
     
     if st.session_state.pagina == "disparos":
-        # --- SEGURANÇA EXTRA: Se não for admin e tentar entrar, bloqueia ---
         if st.session_state.usuario['funcao'] != 'admin':
-            st.error("⛔ Acesso Negado. Apenas administradores podem fazer disparos em massa.")
+            st.error("⛔ Acesso Negado.")
         else:
             st.title("📢 Disparos em Massa (Admin)")
-            
             c1, c2 = st.columns([2, 1])
             with c1:
                 st.subheader("1. Lista de Contatos")
                 st.caption("Cole os números abaixo (um por linha ou separados por vírgula).")
                 raw_numbers = st.text_area("Números de Telefone", height=200)
-                
             with c2:
                 st.subheader("2. Configuração")
-                
                 us = listar_usuarios_ativos()
                 ud = {u[1]:u[0] for _,u in us.iterrows()}
-                
                 vend_sel = st.selectbox("Atribuir à Vendedora:", list(ud.keys()))
                 id_vend_sel = ud[vend_sel]
                 
@@ -348,11 +354,9 @@ else:
                 if not df_tpl.empty:
                     tpl_list = df_tpl['nome_tecnico'].tolist()
                     tpl_sel = st.selectbox("Template:", tpl_list)
-                    
                     st.markdown("**Variáveis do Lote:**")
                     dv1 = st.text_input("Var {{1}}")
                     dv2 = st.text_input("Var {{2}}")
-                    
                     custo_estimado = df_tpl[df_tpl['nome_tecnico']==tpl_sel]['custo_estimado'].values[0]
                 else:
                     st.error("Nenhum template cadastrado.")
@@ -394,10 +398,11 @@ else:
                                     msg_log = f"[DISPARO: {tpl_sel}]"
                                     if vars_to_send: msg_log += f" Vars: {vars_to_send}"
                                     conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":cid, "t":msg_log, "c":custo_estimado})
+                                    # ATUALIZA CONTEXTO PARA RESPOSTA AUTOMATICA
+                                    conn.execute(text("UPDATE contatos SET contexto_bot = :ctx WHERE id = :id"), {"ctx":tpl_sel, "id":cid})
                                     conn.commit()
                             else: erro += 1
                         else: erro += 1
-                        
                         bar.progress((i + 1) / total)
                         time.sleep(0.2)
                     
@@ -489,21 +494,17 @@ else:
             with st.expander("📢 Enviar Template"):
                 bloqueado = verificar_bloqueio_usuario(st.session_state.usuario['id'])
                 if bloqueado and st.session_state.usuario['funcao'] != 'admin':
-                    st.error("🚫 O envio de templates está bloqueado para seu usuário. Contate o administrador.")
+                    st.error("🚫 Bloqueado.")
                 else:
                     if bloqueado: st.warning("⚠️ Você está bloqueado, mas como é Admin, pode enviar.")
-                    
                     df_tpl = listar_templates()
                     if not df_tpl.empty:
                         tpl_list = df_tpl['nome_tecnico'].tolist()
                         tpl_costs = {row['nome_tecnico']: row['custo_estimado'] for _, row in df_tpl.iterrows()}
-                        
                         tpl_sel = st.selectbox("Selecione", ["--"] + tpl_list)
                         if tpl_sel != "--":
                             custo_tpl = tpl_costs.get(tpl_sel, 0.0)
                             st.caption(f"Custo Estimado: R$ {custo_tpl:.2f}")
-                            
-                            st.write("**Preencha as variáveis:**")
                             col_v1, col_v2 = st.columns(2)
                             var1 = col_v1.text_input("Variável {{1}}")
                             var2 = col_v2.text_input("Variável {{2}}")
@@ -519,6 +520,8 @@ else:
                                         msg_txt = f"[TPL: {tpl_sel}]"
                                         if vars_to_send: msg_txt += f" Vars: {vars_to_send}"
                                         conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":msg_txt, "c":custo_tpl})
+                                        # SETA CONTEXTO TAMBEM NO ENVIO MANUAL
+                                        conn.execute(text("UPDATE contatos SET contexto_bot = :ctx WHERE id = :id"), {"ctx":tpl_sel, "id":st.session_state.chat_ativo})
                                         conn.commit()
                                     st.success("Enviado"); st.rerun()
                                 else: st.error(f"Erro: {r}")
@@ -552,11 +555,9 @@ else:
             st.subheader("Gerenciar Usuários")
             dfu = listar_todos_usuarios()
             st.dataframe(dfu[['id','nome','email','funcao','bloqueado_envio']], use_container_width=True)
-            
             u_ids = dfu['id'].tolist()
             sel_uid = st.selectbox("Selecione Usuário para Editar", u_ids, format_func=lambda x: dfu[dfu['id']==x]['nome'].values[0])
             user_info = dfu[dfu['id']==sel_uid].iloc[0]
-            
             with st.form("edit_user"):
                 c_edit1, c_edit2 = st.columns(2)
                 with c_edit1:
@@ -566,31 +567,55 @@ else:
                     current_idx = 0 if user_info['funcao'] == 'vendedor' else 1
                     nf = st.selectbox("Função", ["vendedor", "admin"], index=current_idx)
                     ns = st.text_input("Nova Senha (deixe branco se não mudar)", type="password")
-                
                 is_blocked = bool(user_info['bloqueado_envio'])
-                block_check = st.checkbox("🚫 Bloquear Envio de Templates (Trava o Vendedor)", value=is_blocked)
-                
+                block_check = st.checkbox("🚫 Bloquear Envio de Templates", value=is_blocked)
                 if st.form_submit_button("Salvar Alterações"): 
                     res, msg = editar_usuario(sel_uid, nn, ne, nf, ns if ns else None, bloqueado=block_check)
                     if res: st.success(msg); time.sleep(1); st.rerun()
                     else: st.error(msg)
-            
-            st.divider()
             if st.button("Excluir Usuário", type="primary"): excluir_usuario(sel_uid); st.rerun()
 
         with tab3:
+            st.subheader("🤖 Mensagens Automáticas")
             msg = pegar_msg_boas_vindas()
             with st.form("cr"):
-                txt = st.text_area("Saudação Automática", value=msg)
-                if st.form_submit_button("Salvar"): 
+                st.caption("Saudação Padrão (Fila/Início)")
+                txt = st.text_area("Texto de Saudação", value=msg)
+                if st.form_submit_button("Salvar Saudação"): 
                     sucesso, retorno = salvar_msg_boas_vindas(txt)
                     if sucesso: st.success("Ok")
-                    else: st.error(f"Erro: {retorno}")
-        
+            
+            st.divider()
+            st.subheader("🔗 Regras de Fluxo (Templates)")
+            st.info("Aqui você define: SE eu enviar o template X, E o cliente responder, O robô responde Y.")
+            
+            dft = listar_templates()
+            if not dft.empty:
+                tpls = dft['nome_tecnico'].tolist()
+                with st.form("add_rule"):
+                    gatilho_sel = st.selectbox("Se enviar o Template:", tpls)
+                    resp_texto = st.text_area("O Robô Responde:")
+                    if st.form_submit_button("Criar Regra"):
+                        if resp_texto:
+                            criar_regra_bot(gatilho_sel, resp_texto)
+                            st.success("Regra Criada!")
+                            time.sleep(1); st.rerun()
+                        else: st.warning("Escreva uma resposta.")
+            else: st.warning("Cadastre templates primeiro.")
+            
+            df_regras = listar_regras_bot()
+            if not df_regras.empty:
+                st.write("Regras Ativas:")
+                for _, row in df_regras.iterrows():
+                    c1, c2, c3 = st.columns([2, 3, 1])
+                    c1.code(row['template_gatilho'])
+                    c2.text(row['resposta_texto'])
+                    if c3.button("🗑️", key=f"dreg_{row['id']}"): excluir_regra_bot(row['id']); st.rerun()
+
         with tab4:
             st.info("Cadastre o nome TÉCNICO e o CUSTO do template.")
             with st.form("ntpl"):
-                nt = st.text_input("Nome Técnico (ex: contato_inicial)")
+                nt = st.text_input("Nome Técnico (ex: pos_venda_1)")
                 ce = st.number_input("Custo Estimado (R$)", min_value=0.0, max_value=5.0, value=0.05, step=0.01)
                 if st.form_submit_button("Cadastrar"):
                     b, m = criar_template(nt, ce)
@@ -605,7 +630,7 @@ else:
                         excluir_template(row['id']); st.rerun()
         
         with tab5:
-            st.subheader("💰 Relatório de Custos (Templates)")
+            st.subheader("💰 Relatório de Custos")
             dias = st.slider("Período (dias)", 1, 90, 30)
             df_fin = gerar_relatorio_custos(dias)
             if not df_fin.empty:
