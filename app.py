@@ -154,7 +154,7 @@ def salvar_msg_boas_vindas(txt):
         return True, "Salvo!"
     except Exception as e: return False, f"Erro: {e}"
 
-# --- REGRAS BOT ---
+# --- REGRAS BOT (COM PROTEÇÃO CONTRA ERRO) ---
 def criar_regra_bot(gatilho, resposta):
     try:
         with engine.connect() as conn:
@@ -164,7 +164,12 @@ def criar_regra_bot(gatilho, resposta):
     except Exception as e: return False, str(e)
 
 def listar_regras_bot():
-    with engine.connect() as conn: return pd.read_sql(text("SELECT * FROM bot_regras"), conn)
+    try:
+        with engine.connect() as conn: 
+            return pd.read_sql(text("SELECT * FROM bot_regras"), conn)
+    except Exception:
+        # Se tabela não existe, retorna vazio e não trava
+        return pd.DataFrame()
 
 def excluir_regra_bot(rid):
     with engine.connect() as conn:
@@ -398,7 +403,6 @@ else:
                                     msg_log = f"[DISPARO: {tpl_sel}]"
                                     if vars_to_send: msg_log += f" Vars: {vars_to_send}"
                                     conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":cid, "t":msg_log, "c":custo_estimado})
-                                    # ATUALIZA CONTEXTO PARA RESPOSTA AUTOMATICA
                                     conn.execute(text("UPDATE contatos SET contexto_bot = :ctx WHERE id = :id"), {"ctx":tpl_sel, "id":cid})
                                     conn.commit()
                             else: erro += 1
@@ -520,7 +524,6 @@ else:
                                         msg_txt = f"[TPL: {tpl_sel}]"
                                         if vars_to_send: msg_txt += f" Vars: {vars_to_send}"
                                         conn.execute(text("INSERT INTO mensagens (contato_id, remetente, texto, tipo, custo) VALUES (:cid,'empresa',:t,'template',:c)"), {"cid":st.session_state.chat_ativo, "t":msg_txt, "c":custo_tpl})
-                                        # SETA CONTEXTO TAMBEM NO ENVIO MANUAL
                                         conn.execute(text("UPDATE contatos SET contexto_bot = :ctx WHERE id = :id"), {"ctx":tpl_sel, "id":st.session_state.chat_ativo})
                                         conn.commit()
                                     st.success("Enviado"); st.rerun()
@@ -577,6 +580,21 @@ else:
 
         with tab3:
             st.subheader("🤖 Mensagens Automáticas")
+            
+            # --- BOTÃO DE EMERGÊNCIA (SALVA-VIDAS) ---
+            with st.expander("🛠️ Reparar Banco de Dados (Use se der erro)"):
+                if st.button("Forçar Criação da Tabela 'bot_regras'"):
+                    try:
+                        with engine.connect() as conn:
+                            conn.execute(text("""CREATE TABLE IF NOT EXISTS bot_regras (id SERIAL PRIMARY KEY, template_gatilho TEXT UNIQUE, resposta_texto TEXT);"""))
+                            conn.execute(text("""ALTER TABLE contatos ADD COLUMN IF NOT EXISTS contexto_bot TEXT;"""))
+                            conn.commit()
+                        st.success("Tabela criada! Recarregue a página.")
+                        time.sleep(2)
+                        st.rerun()
+                    except Exception as e: st.error(f"Erro ao criar: {e}")
+            # -------------------------------------------
+
             msg = pegar_msg_boas_vindas()
             with st.form("cr"):
                 st.caption("Saudação Padrão (Fila/Início)")
